@@ -15,10 +15,7 @@
       "autoIncrement": true,
       "android": {
         "image": "latest",
-        "gradleCommand": ":app:bundleRelease",
-        "env": {
-          "JAVA_HOME": "/usr/lib/jvm/java-17-openjdk-amd64"
-        }
+        "gradleCommand": ":app:bundleRelease"
       }
     }
   },
