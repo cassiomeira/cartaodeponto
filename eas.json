@@ -12,10 +12,7 @@
       "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true,
-      "ios": {
-        "scheme": "App"
-      }
+      "autoIncrement": true
     }
   },
   "submit": {
