@@ -376,6 +376,10 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
   const [justification, setJustification] = useState('');
   const [pendingPunchData, setPendingPunchData] = useState(null);
 
+  // Estados para Almoço Offline
+  const [showOfflineLunchModal, setShowOfflineLunchModal] = useState(false);
+  const [offlineLunchJustification, setOfflineLunchJustification] = useState('');
+
   // Ref para o watcher de GPS
   const watchIdRef = useRef(null);
 
@@ -563,6 +567,16 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
     proceedWithPunch(type, null);
   };
 
+  const handleOfflineLunch = () => {
+    if (!offlineLunchJustification.trim()) {
+      alert('Por favor, informe onde você vai trabalhar/almoçar.');
+      return;
+    }
+    setShowOfflineLunchModal(false);
+    proceedWithPunch('lunch_offline', offlineLunchJustification);
+    setOfflineLunchJustification('');
+  };
+
   // Função separada para processar o punch (com ou sem justificativa)
   const proceedWithPunch = async (type, justificationText) => {
     setLoading(true);
@@ -636,7 +650,19 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
 
   const getNextAction = () => {
     if (!lastPunch) return 'entrada';
-    if (lastPunch.type === 'entrada') return 'saida_almoco';
+
+    // Se o último registro foi almoço offline, o próximo passo é encerrar o dia
+    if (lastPunch.type === 'lunch_offline') return 'saida';
+
+    if (lastPunch.type === 'entrada') {
+      // Se já tiver almoço offline registrado hoje (mesmo que não seja o último punch, o que seria estranho mas possível),
+      // o próximo passo deve ser sair.
+      const hasOfflineLunch = todayPunches.some(p => p.type === 'lunch_offline');
+      if (hasOfflineLunch) return 'saida';
+
+      return 'saida_almoco';
+    }
+
     if (lastPunch.type === 'saida_almoco') return 'volta_almoco';
     if (lastPunch.type === 'volta_almoco') return 'saida';
     if (lastPunch.type === 'saida') return 'extra_start';
@@ -717,10 +743,42 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
               active={nextAction === 'entrada' || nextAction === 'extra_start'}
             />
 
-            <div className="grid grid-cols-2 gap-4">
-              <ActionButton type="saida_almoco" label="Saída Almoço" icon={Coffee} colorClass="bg-yellow-500 hover:bg-yellow-600" active={nextAction === 'saida_almoco'} />
-              <ActionButton type="volta_almoco" label="Volta Almoço" icon={CheckCircle} colorClass="bg-yellow-600 hover:bg-yellow-700" active={nextAction === 'volta_almoco'} />
-            </div>
+            {nextAction === 'saida_almoco' ? (
+              <div className="space-y-4">
+                <ActionButton type="saida_almoco" label="Iniciar Almoço" icon={Coffee} colorClass="bg-yellow-500 hover:bg-yellow-600" active={true} />
+                <button
+                  onClick={() => setShowOfflineLunchModal(true)}
+                  disabled={loading}
+                  className="w-full bg-slate-600 hover:bg-slate-700 text-white font-bold py-4 px-6 rounded-2xl shadow-lg shadow-slate-600/30 transform transition-all active:scale-95 flex items-center justify-center gap-3"
+                >
+                  <MapPinOff size={24} />
+                  <span>Almoço Offline</span>
+                </button>
+              </div>
+            ) : nextAction === 'volta_almoco' ? (
+              <ActionButton type="volta_almoco" label="Volta Almoço" icon={CheckCircle} colorClass="bg-yellow-600 hover:bg-yellow-700" active={true} />
+            ) : (
+              <div className="grid grid-cols-2 gap-4">
+                {/* Fallback ou estado inativo */}
+                <ActionButton type="saida_almoco" label="Saída Almoço" icon={Coffee} colorClass="bg-yellow-500 hover:bg-yellow-600" active={false} />
+                <ActionButton type="volta_almoco" label="Volta Almoço" icon={CheckCircle} colorClass="bg-yellow-600 hover:bg-yellow-700" active={false} />
+              </div>
+            )}
+
+            {/* Estado: Almoço Offline Ativo */}
+            {todayPunches.some(p => p.type === 'lunch_offline') && (
+              <div className="bg-gray-100 border-l-4 border-gray-500 p-4 rounded-r-xl mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="bg-gray-200 p-2 rounded-full">
+                    <MapPinOff size={24} className="text-gray-600" />
+                  </div>
+                  <div>
+                    <p className="font-bold text-gray-800">Almoço Offline Registrado</p>
+                    <p className="text-sm text-gray-600">Duração contabilizada: 1h fixa</p>
+                  </div>
+                </div>
+              </div>
+            )}
             <ActionButton type="saida" label="Encerrar Dia" icon={LogOut} colorClass="bg-red-600 hover:bg-red-700" active={nextAction === 'saida'} />
           </div>
         )}
@@ -768,32 +826,82 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
         </div>
       </div>
 
-      {/* MODAL DE JUSTIFICATIVA DE HORA EXTRA */}
-      {showJustificationModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in-95">
-            <div className="bg-yellow-500 p-4 flex justify-between items-center text-white">
-              <h3 className="font-bold flex items-center gap-2"><AlertTriangle size={20} /> Hora Extra Detectada</h3>
-              <button onClick={() => {
-                setShowJustificationModal(false);
-                setPendingPunchData(null);
-                setJustification('');
-              }} className="hover:bg-yellow-600 p-1 rounded"><X size={20} /></button>
-            </div>
-            <div className="p-6">
-              <p className="text-slate-600 mb-4 text-sm">
-                Você está encerrando o dia <strong>após o horário agendado</strong> (tolerância de 10 min excedida).
-                <br /><br />
-                <strong>É obrigatório justificar o motivo:</strong>
+
+
+      {/* Modal de Almoço Offline */}
+      {showOfflineLunchModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-slate-600 p-6 text-white">
+              <h3 className="text-xl font-bold flex items-center gap-2">
+                <MapPinOff size={24} /> Almoço Offline
+              </h3>
+              <p className="text-slate-200 text-sm mt-1">
+                Use esta opção se não puder bater o ponto de almoço normalmente.
               </p>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded-r">
+                <p className="text-sm text-yellow-800 font-medium">
+                  Atenção: O sistema contabilizará automaticamente <strong>1 hora</strong> de intervalo, independente do tempo real.
+                </p>
+              </div>
 
-              <textarea
-                value={justification}
-                onChange={(e) => setJustification(e.target.value)}
-                placeholder="Ex: Finalizando chamado urgente no cliente X..."
-                className="w-full border border-slate-300 rounded-lg px-4 py-3 text-sm mb-6 focus:ring-2 focus:ring-yellow-500 outline-none h-32 resize-none"
-              />
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">
+                  Onde você vai trabalhar/almoçar? <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  value={offlineLunchJustification}
+                  onChange={(e) => setOfflineLunchJustification(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-slate-500 outline-none resize-none h-32"
+                  placeholder="Ex: Cliente X, Local sem sinal..."
+                />
+              </div>
 
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setShowOfflineLunchModal(false)}
+                  className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={handleOfflineLunch}
+                  className="flex-1 bg-slate-600 hover:bg-slate-700 text-white font-bold py-3 rounded-xl shadow-lg shadow-slate-600/30 transition-all active:scale-95"
+                >
+                  Confirmar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Justificativa de Hora Extra */}
+      {showJustificationModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-yellow-500 p-6 text-white">
+              <h3 className="text-xl font-bold flex items-center gap-2">
+                <AlertTriangle size={24} /> Hora Extra Detectada
+              </h3>
+              <p className="text-yellow-100 text-sm mt-1">
+                Você excedeu seu horário de saída em mais de 10 minutos.
+              </p>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">
+                  Justificativa Obrigatória <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  value={justification}
+                  onChange={(e) => setJustification(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-yellow-500 outline-none resize-none h-32"
+                  placeholder="Descreva o motivo da hora extra..."
+                />
+              </div>
               <button
                 onClick={() => {
                   if (!justification.trim()) {
@@ -822,6 +930,7 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
 const ManagerDashboard = ({ currentUserData, onLogout }) => {
   const [punches, setPunches] = useState([]);
   const [allUsers, setAllUsers] = useState([]); // Nova lista de usuários
+  const [holidays, setHolidays] = useState([]); // Lista de feriados
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
 
   // Estado para fechamento manual
@@ -898,6 +1007,224 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     } catch (error) {
       console.error('Erro ao alterar role:', error);
       alert('Erro ao atualizar permissões.');
+    }
+  };
+
+  // Alterar Senha
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [selectedUserForPassword, setSelectedUserForPassword] = useState(null);
+  const [newPassword, setNewPassword] = useState('');
+
+  const openPasswordModal = (user) => {
+    setSelectedUserForPassword(user);
+    setNewPassword('');
+    setShowPasswordModal(true);
+  };
+
+  const handleChangePassword = async () => {
+    if (!newPassword.trim()) return alert("Digite uma nova senha.");
+    if (!selectedUserForPassword) return;
+
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', selectedUserForPassword.id), {
+        password: newPassword.trim()
+      });
+      alert(`Senha de ${selectedUserForPassword.name} alterada com sucesso!`);
+      setShowPasswordModal(false);
+    } catch (error) {
+      console.error("Erro ao alterar senha:", error);
+      alert("Erro ao alterar senha.");
+    }
+  };
+
+  // --- EDIÇÃO DE PONTO (GESTOR) ---
+  const [showEditPunchModal, setShowEditPunchModal] = useState(false);
+  const [editingPunches, setEditingPunches] = useState([]);
+  const [editingUser, setEditingUser] = useState(null);
+  const [editingDate, setEditingDate] = useState(null);
+
+  const openEditPunchModal = (user, dateStr, dailyPunches) => {
+    setEditingUser(user);
+    setEditingDate(dateStr);
+
+    // Prepara os dados para edição
+    // Se não houver punches, inicia vazio
+    const formattedPunches = dailyPunches.map(p => ({
+      id: p.id,
+      type: p.type,
+      time: formatTime(getDateFromTimestamp(p.timestamp)),
+      original: p // Guarda referência para deletar se necessário
+    })).sort((a, b) => a.time.localeCompare(b.time));
+
+    setEditingPunches(formattedPunches);
+    setShowEditPunchModal(true);
+  };
+
+  const handleAddPunchRow = () => {
+    setEditingPunches([...editingPunches, { id: `temp_${Date.now()}`, type: 'entrada', time: '', isNew: true }]);
+  };
+
+  const handleRemovePunchRow = (index) => {
+    const newPunches = [...editingPunches];
+    newPunches.splice(index, 1);
+    setEditingPunches(newPunches);
+  };
+
+  const handlePunchChange = (index, field, value) => {
+    const newPunches = [...editingPunches];
+    newPunches[index][field] = value;
+    setEditingPunches(newPunches);
+  };
+
+  const savePunchEdits = async () => {
+    if (!editingUser || !editingDate) return;
+
+    // Validação básica
+    for (const p of editingPunches) {
+      if (!p.time) {
+        alert("Todos os registros devem ter um horário.");
+        return;
+      }
+    }
+
+    // Validação de Email
+    if (!editingUser.email) {
+      alert("Erro: Usuário sem e-mail cadastrado. Não é possível editar.");
+      return;
+    }
+
+    try {
+      const batch = writeBatch(db);
+
+      // Solução: Buscar no Firestore todos os punches desse usuário nessa data e deletar.
+      const startOfDay = new Date(editingDate + 'T00:00:00');
+      const endOfDay = new Date(editingDate + 'T23:59:59');
+
+      // FIX: Usar o estado local 'punches' para filtrar os IDs a serem deletados.
+      // Isso evita o erro de "Missing Index" no Firestore para queries compostas (email + timestamp).
+      // Como já temos todos os punches carregados na memória, é seguro e mais rápido.
+      const punchesToDelete = punches.filter(p => {
+        if (p.userEmail !== editingUser.email) return false;
+        if (!p.dateObj) return false;
+        return p.dateObj >= startOfDay && p.dateObj <= endOfDay;
+      });
+
+      punchesToDelete.forEach(p => {
+        const ref = doc(db, 'artifacts', appId, 'public', 'data', 'punches', p.id);
+        batch.delete(ref);
+      });
+
+      // 2. Criar os novos punches
+      editingPunches.forEach(p => {
+        const [hours, minutes] = p.time.split(':');
+        // FIX: Criar data baseada no início do dia local para evitar problemas de timezone
+        const dateObj = new Date(editingDate + 'T00:00:00');
+        dateObj.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+
+        const newPunchRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'punches'));
+        batch.set(newPunchRef, {
+          userEmail: editingUser.email,
+          userName: editingUser.name,
+          type: p.type,
+          timestamp: dateObj,
+          location: null, // Edição manual não tem GPS
+          editedByAdmin: true,
+          editedAt: serverTimestamp()
+        });
+      });
+
+      await batch.commit();
+      alert("Registros atualizados com sucesso!");
+      setShowEditPunchModal(false);
+    } catch (error) {
+      console.error("Erro ao salvar edições:", error);
+      alert(`Erro ao salvar edições: ${error.message}`);
+    }
+  };
+
+  // --- FÉRIAS ---
+  const [vacationDays, setVacationDays] = useState(30);
+  const [showVacationInput, setShowVacationInput] = useState(false);
+
+  const handleVacationRegistration = async () => {
+    if (!editingUser || !editingDate) return;
+    if (vacationDays < 1) return alert("Mínimo de 1 dia.");
+
+    if (!window.confirm(`Registrar FÉRIAS para ${editingUser.name} iniciando em ${formatDate(editingDate)} por ${vacationDays} dias?\n\nISSO SUBSTITUIRÁ TODOS OS REGISTROS NESTE PERÍODO.`)) return;
+
+    try {
+      const batch = writeBatch(db);
+      const startDate = new Date(editingDate + 'T00:00:00');
+
+      // Loop pelos dias de férias
+      for (let i = 0; i < vacationDays; i++) {
+        const currentDate = new Date(startDate);
+        currentDate.setDate(startDate.getDate() + i);
+        const dateStr = currentDate.toISOString().split('T')[0];
+
+        const startOfDay = new Date(dateStr + 'T00:00:00');
+        const endOfDay = new Date(dateStr + 'T23:59:59');
+
+        // 1. Deletar registros existentes (precisamos buscar no banco pois podem ser dias futuros que não estão na memória)
+        // Como o batch tem limite de 500, e férias podem ser 30 dias, e cada dia pode ter 4 punches... 30*4 = 120. OK.
+        // Mas precisamos buscar os IDs primeiro.
+        // Para simplificar e evitar muitas leituras, vamos fazer uma query para o range todo.
+        // Mas queries em loop são ruins.
+
+        // Melhor: Fazer uma query única para o período todo.
+      }
+
+      // Abordagem Otimizada (sem Index Composto):
+      // 1. Buscar todos os punches do período (de TODOS os usuários)
+      // O Firestore cria índices automáticos para campos individuais.
+      // Consultar apenas por timestamp (range) funciona sem índice composto.
+      // Depois filtramos por email no cliente.
+      const endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + vacationDays);
+
+      const q = query(
+        collection(db, 'artifacts', appId, 'public', 'data', 'punches'),
+        where('timestamp', '>=', startDate),
+        where('timestamp', '<', endDate)
+      );
+
+      const snapshot = await getDocs(q);
+
+      // Filtra em memória para deletar apenas os do usuário atual
+      snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        if (data.userEmail === editingUser.email) {
+          batch.delete(doc.ref);
+        }
+      });
+
+      // 2. Criar novos punches de Férias
+      for (let i = 0; i < vacationDays; i++) {
+        const currentDate = new Date(startDate);
+        currentDate.setDate(startDate.getDate() + i);
+
+        // Pular Finais de Semana? Geralmente férias contam dias corridos.
+        // O usuário pediu "quantos dias", então assume-se dias corridos.
+
+        const newPunchRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'punches'));
+        batch.set(newPunchRef, {
+          userEmail: editingUser.email,
+          userName: editingUser.name,
+          type: 'ferias',
+          timestamp: currentDate, // Meio dia ou 00:00? 00:00 ok.
+          location: null,
+          editedByAdmin: true,
+          editedAt: serverTimestamp()
+        });
+      }
+
+      await batch.commit();
+      alert("Férias registradas com sucesso!");
+      setShowEditPunchModal(false);
+      setShowVacationInput(false);
+    } catch (error) {
+      console.error("Erro ao registrar férias:", error);
+      alert(`Erro ao registrar férias: ${error.message}`);
     }
   };
 
@@ -987,6 +1314,38 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     }
   };
 
+  // Estado para Edição de Cidade
+  const [showCityModal, setShowCityModal] = useState(false);
+  const [selectedUserForCity, setSelectedUserForCity] = useState(null);
+  const [newCity, setNewCity] = useState('');
+
+  // Estado para Ordenação do Dashboard
+  const [sortBy, setSortBy] = useState('name'); // 'name', 'status', 'city'
+  const [sortOrder, setSortOrder] = useState('asc'); // 'asc', 'desc'
+
+  const handleUpdateCity = async () => {
+    if (!selectedUserForCity) return;
+
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', selectedUserForCity.id), {
+        city: newCity.trim()
+      });
+      setShowCityModal(false);
+      setNewCity('');
+      setSelectedUserForCity(null);
+      alert("Cidade atualizada com sucesso!");
+    } catch (error) {
+      console.error("Erro ao atualizar cidade:", error);
+      alert("Erro ao atualizar cidade.");
+    }
+  };
+
+  const openCityModal = (user) => {
+    setSelectedUserForCity(user);
+    setNewCity(user.city || '');
+    setShowCityModal(true);
+  };
+
   // Buscar Usuários
   useEffect(() => {
     const qUsers = query(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
@@ -1009,6 +1368,93 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     }, (error) => console.error(error));
     return () => unsubscribe();
   }, []);
+
+  // Buscar Feriados
+  useEffect(() => {
+    const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setHolidays(data);
+    }, (error) => console.error("Erro ao buscar feriados:", error));
+    return () => unsubscribe();
+  }, []);
+
+  // Importar Feriados Nacionais
+  const importNationalHolidays = async () => {
+    if (!window.confirm("Deseja importar os feriados nacionais de 2025 e 2026? Isso pode duplicar se já existirem.")) return;
+
+    const nationalHolidays = [
+      // 2025
+      { date: '2025-01-01', name: 'Confraternização Universal' },
+      { date: '2025-03-03', name: 'Carnaval (Segunda)' },
+      { date: '2025-03-04', name: 'Carnaval (Terça)' },
+      { date: '2025-04-18', name: 'Paixão de Cristo' },
+      { date: '2025-04-21', name: 'Tiradentes' },
+      { date: '2025-05-01', name: 'Dia do Trabalho' },
+      { date: '2025-06-19', name: 'Corpus Christi' },
+      { date: '2025-09-07', name: 'Independência do Brasil' },
+      { date: '2025-10-12', name: 'Nossa Sra. Aparecida' },
+      { date: '2025-11-02', name: 'Finados' },
+      { date: '2025-11-15', name: 'Proclamação da República' },
+      { date: '2025-11-20', name: 'Dia da Consciência Negra' },
+      { date: '2025-12-25', name: 'Natal' },
+      // 2026
+      { date: '2026-01-01', name: 'Confraternização Universal' },
+      { date: '2026-02-16', name: 'Carnaval (Segunda)' },
+      { date: '2026-02-17', name: 'Carnaval (Terça)' },
+      { date: '2026-04-03', name: 'Paixão de Cristo' },
+      { date: '2026-04-21', name: 'Tiradentes' },
+      { date: '2026-05-01', name: 'Dia do Trabalho' },
+      { date: '2026-06-04', name: 'Corpus Christi' },
+      { date: '2026-09-07', name: 'Independência do Brasil' },
+      { date: '2026-10-12', name: 'Nossa Sra. Aparecida' },
+      { date: '2026-11-02', name: 'Finados' },
+      { date: '2026-11-15', name: 'Proclamação da República' },
+      { date: '2026-11-20', name: 'Dia da Consciência Negra' },
+      { date: '2026-12-25', name: 'Natal' }
+    ];
+
+    const batch = writeBatch(db);
+    nationalHolidays.forEach(h => {
+      const ref = doc(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'));
+      batch.set(ref, h);
+    });
+
+    try {
+      await batch.commit();
+      alert("Feriados importados com sucesso!");
+    } catch (error) {
+      console.error("Erro ao importar feriados:", error);
+      alert("Erro ao importar feriados.");
+    }
+  };
+
+  // Adicionar Feriado Manual
+  const [newHolidayDate, setNewHolidayDate] = useState('');
+  const [newHolidayName, setNewHolidayName] = useState('');
+
+  const addHoliday = async () => {
+    if (!newHolidayDate || !newHolidayName) return alert("Preencha data e nome.");
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'), {
+        date: newHolidayDate,
+        name: newHolidayName
+      });
+      setNewHolidayDate('');
+      setNewHolidayName('');
+    } catch (error) {
+      alert("Erro ao adicionar feriado.");
+    }
+  };
+
+  const deleteHoliday = async (id) => {
+    if (!window.confirm("Excluir este feriado?")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'holidays', id));
+    } catch (error) {
+      alert("Erro ao excluir feriado.");
+    }
+  };
 
   // EXPORTAR PARA EXCEL (CSV)
   const exportToCSV = () => {
@@ -1107,9 +1553,9 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         totalWorkedMs: 0,
         lunchDurationMs: 0,
         status: 'Offline',
-        lastAction: null,
-        lastLocation: null,
-        completed: false
+
+        offlineLunch: null,
+        city: user.city || 'Sem cidade'
       };
     });
 
@@ -1131,7 +1577,8 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
               email: p.userEmail,
               punches: [p],
               totalWorkedMs: 0, lunchDurationMs: 0, status: 'Offline',
-              lastAction: null, lastLocation: null, completed: false
+              lastAction: null, lastLocation: null, completed: false, offlineLunch: null,
+              city: userObj.city || 'Sem cidade'
             };
           }
         }
@@ -1171,6 +1618,17 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
           if (punch.type === 'saida_almoco') {
             lastLunchStart = punch.dateObj;
           }
+        } else if (punch.type === 'lunch_offline') {
+          // Almoço offline, contabiliza 1h fixa
+          userStat.lunchDurationMs += 3600000; // 1 hora
+          // Se estava trabalhando, fecha o período de trabalho
+          if (lastWorkStart) {
+            userStat.totalWorkedMs += (punch.dateObj - lastWorkStart);
+            lastWorkStart = null;
+          }
+          // Armazena o punch de almoço offline para exibir comentário
+          userStat.offlineLunch = punch;
+          // Não inicia lastLunchStart, pois é um almoço "fora do ponto"
         }
       });
 
@@ -1194,20 +1652,90 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         if (last.type === 'saida') {
           userStat.status = 'Finalizado';
           userStat.completed = true;
+        } else if (last.type === 'lunch_offline') {
+          // Se o último registro foi almoço offline, ele tecnicamente já "voltou" do almoço (pois é instantâneo)
+          // e está trabalhando até bater a saída.
+          // Mas como não temos um "lastWorkStart" aberto (pois fechamos ele ao bater lunch_offline),
+          // precisamos reabrir ou tratar esse caso.
+          // Melhor abordagem: Ao bater lunch_offline, definimos que ele continua trabalhando.
+          // O loop anterior fechou o workStart. Vamos ajustar o loop ou ajustar aqui.
+
+          // Ajuste aqui: Se o último foi lunch_offline, ele está trabalhando.
+          userStat.status = 'Trabalhando';
+          // E precisamos somar o tempo desde o registro do almoço offline até agora como trabalho
+          if (isToday) userStat.totalWorkedMs += (now - last.dateObj);
         } else {
-          userStat.status = 'Offline'; // Caso estranho
+          userStat.status = 'Offline';
         }
       }
 
       return userStat;
     });
 
+
+
+    // Ordenação
+    processedStats.sort((a, b) => {
+      let valA = a[sortBy];
+      let valB = b[sortBy];
+
+      // Tratamento para strings (case insensitive)
+      if (typeof valA === 'string') valA = valA.toLowerCase();
+      if (typeof valB === 'string') valB = valB.toLowerCase();
+
+      if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
+      if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
+      return 0;
+    });
+
     return processedStats;
-  }, [punches, selectedDate, allUsers]);
+  }, [punches, selectedDate, allUsers, sortBy, sortOrder]);
 
   // Estado para Relatórios
   const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
   const [reportUser, setReportUser] = useState('');
+
+  const reportUserObj = useMemo(() => allUsers.find(u => u.id === reportUser), [allUsers, reportUser]);
+
+  // Função auxiliar para obter horas esperadas
+  const getExpectedWorkHours = (dayOfWeek, user, date) => {
+    // Verifica se é feriado
+    const dateStr = date.toISOString().split('T')[0];
+    const isHoliday = holidays.some(h => h.date === dateStr);
+    if (isHoliday) return 0;
+
+    // Se for ferias, a expectativa é 0 (será tratado no dailyStats, mas aqui ajuda se precisarmos)
+    // Como não temos acesso aos punches aqui facilmente sem passar, mantemos a lógica no dailyStats.
+    // Mas se quisermos ser precisos:
+    // return 0; // Se tivermos certeza. Por enquanto, deixamos o dailyStats zerar.
+
+    // Verifica se tem atestado neste dia (passado via argumento ou buscado nos punches)
+    // Como essa função é usada dentro do loop de stats, podemos passar um flag ou verificar os punches do dia
+    // Mas aqui só recebemos (dayOfWeek, user, date).
+    // Melhor abordagem: A lógica de "Atestado" zera o saldo no cálculo do dailyStats, não necessariamente aqui.
+    // MAS, para o saldo ficar 0 (Trabalhado 0 - Esperado 0), precisamos que o esperado seja 0.
+    // Vamos ajustar o dailyStats para setar expectedMs = 0 se tiver atestado.
+
+    // Mantemos a lógica padrão aqui.
+    let expectedMs = 28800000; // 8 horas padrão (8 * 60 * 60 * 1000)
+
+    if (user && user.workSchedule && user.workSchedule[dayOfWeek]) {
+      const sched = user.workSchedule[dayOfWeek];
+      if (sched.active) {
+        const [sh, sm] = (sched.start || '08:00').split(':').map(Number);
+        const [eh, em] = (sched.end || '18:00').split(':').map(Number);
+        const lunchMins = sched.lunchMinutes || 0;
+        expectedMs = ((eh * 60 + em) - (sh * 60 + sm) - lunchMins) * 60000;
+      } else {
+        expectedMs = 0; // Folga
+      }
+    } else if (dayOfWeek === 'saturday') {
+      expectedMs = 14400000; // 4 horas padrão (08:00 às 12:00) para Sábado
+    } else if (dayOfWeek === 'sunday') {
+      expectedMs = 0; // Domingo é folga padrão
+    }
+    return expectedMs;
+  };
 
   // Cálculo do Relatório Mensal
   const monthlyStats = useMemo(() => {
@@ -1217,9 +1745,9 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     const daysInMonth = new Date(year, month, 0).getDate();
     const stats = [];
 
-    // Encontra o usuário selecionado para obter o email
-    const targetUser = allUsers.find(u => u.id === reportUser);
-    if (!targetUser) return [];
+    // Encontra o objeto user original para obter a escala de trabalho
+    const reportUserObj = allUsers.find(u => u.id === reportUser);
+    if (!reportUserObj) return [];
 
     // Filtra punches do usuário e mês selecionados
     const userPunches = punches.filter(p => {
@@ -1228,7 +1756,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       if (!pDate) return false;
 
       // Verifica se é do usuário selecionado (comparando email, que é o vínculo comum)
-      const isUser = p.userEmail === targetUser.email;
+      const isUser = p.userEmail === reportUserObj.email;
 
       return isUser &&
         pDate.getMonth() === month - 1 &&
@@ -1248,54 +1776,59 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       const lunchOut = dayPunches.find(p => p.type === 'saida_almoco');
       const lunchBack = dayPunches.find(p => p.type === 'volta_almoco');
       const exit = dayPunches.findLast(p => p.type === 'saida');
+      const offlineLunch = dayPunches.find(p => p.type === 'lunch_offline');
+      const atestado = dayPunches.find(p => p.type === 'atestado');
+      const ferias = dayPunches.find(p => p.type === 'ferias');
 
-      // Cálculos de tempo
       let workedMs = 0;
       let lunchMs = 0;
 
-      if (entry && exit) {
-        const start = getDateFromTimestamp(entry.timestamp);
-        const end = getDateFromTimestamp(exit.timestamp);
-        workedMs = end - start;
-
+      if (atestado || ferias) {
+        // Se tem atestado ou férias, tudo é zero
+        workedMs = 0;
+        lunchMs = 0;
+      } else if (offlineLunch) {
+        lunchMs = 3600000; // 1 hora fixa
+        if (entry && exit) {
+          const totalDuration = exit.timestamp.toDate() - entry.timestamp.toDate();
+          workedMs = totalDuration - lunchMs;
+        } else if (entry) {
+          // Se ainda não saiu, calcula parcial até agora (opcional, mas mantendo simples: só calcula se tiver saída)
+          // Para "Trabalhando", podemos estimar, mas o saldo real só fecha na saída.
+          // Vamos manter 0 se não tiver saída para evitar confusão, ou calcular parcial se quiser.
+          // O código original calculava parcial se 'exit' não existisse mas 'entry' sim?
+          // O código original: if (entry && exit) ... else if (entry) ...
+          // Vamos adaptar:
+          const now = new Date();
+          const end = exit ? exit.timestamp.toDate() : now;
+          const totalDuration = end - entry.timestamp.toDate();
+          workedMs = Math.max(0, totalDuration - lunchMs);
+        }
+      } else {
+        // Cálculo Padrão
         if (lunchOut && lunchBack) {
-          const lStart = getDateFromTimestamp(lunchOut.timestamp);
-          const lEnd = getDateFromTimestamp(lunchBack.timestamp);
-          lunchMs = lEnd - lStart;
-          workedMs -= lunchMs; // Subtrai almoço do total
+          lunchMs = lunchBack.timestamp.toDate() - lunchOut.timestamp.toDate();
         }
-      } else if (dayPunches.length > 0) {
-        // Cálculo parcial se tiver punches soltos (opcional, mas bom para mostrar algo)
-        // Simplificação: se tiver entrada e saída de almoço, conta esse trecho
-        if (entry && lunchOut) {
-          workedMs += getDateFromTimestamp(lunchOut.timestamp) - getDateFromTimestamp(entry.timestamp);
-        }
-        if (lunchBack && exit) {
-          workedMs += getDateFromTimestamp(exit.timestamp) - getDateFromTimestamp(lunchBack.timestamp);
+
+        if (entry && lunchOut && lunchBack && exit) {
+          workedMs = (lunchOut.timestamp.toDate() - entry.timestamp.toDate()) + (exit.timestamp.toDate() - lunchBack.timestamp.toDate());
+        } else if (entry && lunchOut && lunchBack) {
+          workedMs = (lunchOut.timestamp.toDate() - entry.timestamp.toDate()) + (new Date() - lunchBack.timestamp.toDate());
+        } else if (entry && lunchOut) {
+          workedMs = lunchOut.timestamp.toDate() - entry.timestamp.toDate();
+        } else if (entry) {
+          workedMs = new Date() - entry.timestamp.toDate();
         }
       }
 
-      // Busca configuração de escala do usuário para o dia da semana
+      // Correção para não ficar negativo se o almoço offline for maior que o tempo total (ex: acabou de entrar)
+      if (workedMs < 0) workedMs = 0;
+
       const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][currentDayDate.getDay()];
-      const targetUser = allUsers.find(u => u.id === reportUser || u.email === reportUser);
-      let expectedMs = 28800000; // 8 horas padrão
+      let expectedMs = getExpectedWorkHours(dayOfWeek, reportUserObj, currentDayDate);
 
-      if (targetUser && targetUser.schedule && targetUser.schedule[dayOfWeek]) {
-        const sched = targetUser.schedule[dayOfWeek];
-        if (sched.active) {
-          const [sh, sm] = (sched.start || '08:00').split(':').map(Number);
-          const [eh, em] = (sched.end || '18:00').split(':').map(Number);
-          const lunchMins = sched.lunchMinutes || 0;
-          expectedMs = ((eh * 60 + em) - (sh * 60 + sm) - lunchMins) * 60000;
-        } else {
-          expectedMs = 0; // Folga
-        }
-      }
-
-      // Se for fim de semana e não tiver escala definida, assume folga (0 horas)
-      if (!targetUser?.schedule && (dayOfWeek === 'saturday' || dayOfWeek === 'sunday')) {
-        expectedMs = 0;
-      }
+      // Se for atestado ou férias, a expectativa é 0
+      if (atestado || ferias) expectedMs = 0;
 
       const balanceMs = workedMs - expectedMs;
 
@@ -1306,11 +1839,13 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         lunchOut,
         lunchBack,
         exit,
+        offlineLunch, // Passa o objeto para exibir comentário
         workedMs,
         lunchMs,
         expectedMs,
         balanceMs,
-        hasPunches: dayPunches.length > 0
+        hasPunches: dayPunches.length > 0,
+        punches: dayPunches // Adicionado para permitir edição
       });
     }
 
@@ -1365,18 +1900,23 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
           >
             <div className="flex items-center gap-2"><Globe size={18} /> Mapa em Tempo Real</div>
           </button>
-          {/* Temporariamente desabilitado para debug
           <button
             onClick={() => setActiveTab('admins')}
             className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'admins' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
+            <div className="flex items-center gap-2"><Lock size={18} /> Administradores</div>
           </button>
-          */}
           <button
             onClick={() => setActiveTab('reports')}
             className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'reports' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
             <div className="flex items-center gap-2"><FileText size={18} /> Relatórios</div>
+          </button>
+          <button
+            onClick={() => setActiveTab('holidays')}
+            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'holidays' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            <div className="flex items-center gap-2"><Calendar size={18} /> Feriados</div>
           </button>
         </div>
 
@@ -1409,8 +1949,15 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
-                        <th className="px-6 py-4 font-semibold">Técnico</th>
-                        <th className="px-6 py-4 font-semibold">Status</th>
+                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => { setSortBy('name'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                          Técnico {sortBy === 'name' && (sortOrder === 'asc' ? '↑' : '↓')}
+                        </th>
+                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => { setSortBy('city'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                          Cidade {sortBy === 'city' && (sortOrder === 'asc' ? '↑' : '↓')}
+                        </th>
+                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => { setSortBy('status'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                          Status {sortBy === 'status' && (sortOrder === 'asc' ? '↑' : '↓')}
+                        </th>
                         <th className="px-6 py-4 font-semibold text-center">Horas Trab.</th>
                         <th className="px-6 py-4 font-semibold text-center">Almoço</th>
                         <th className="px-6 py-4 font-semibold text-center">Hora Extra</th>
@@ -1442,7 +1989,33 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                               </button>
                             </td>
                             <td className="px-6 py-4">
-                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${stat.status === 'Trabalhando' ? 'bg-green-100 text-green-800' : stat.status === 'Em Almoço' ? 'bg-yellow-100 text-yellow-800' : stat.status === 'Finalizado' ? 'bg-slate-100 text-slate-800' : stat.status === 'Offline' ? 'bg-gray-100 text-gray-500' : 'bg-red-100 text-red-800'}`}>{stat.status}</span>
+                              <div className="flex items-center gap-2 group">
+                                <span className="text-sm text-slate-600 font-medium">{stat.city}</span>
+                                {userObj && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openCityModal(userObj);
+                                    }}
+                                    className="text-slate-400 hover:text-indigo-600 transition-colors"
+                                    title="Editar Cidade"
+                                  >
+                                    <Settings size={14} />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${stat.punches.some(p => p.type === 'atestado') ? 'bg-blue-100 text-blue-800' :
+                                stat.punches.some(p => p.type === 'ferias') ? 'bg-purple-100 text-purple-800' :
+                                  stat.status === 'Trabalhando' ? 'bg-green-100 text-green-800' :
+                                    stat.status === 'Em Almoço' ? 'bg-yellow-100 text-yellow-800' :
+                                      stat.status === 'Finalizado' ? 'bg-slate-100 text-slate-800' :
+                                        stat.status === 'Offline' ? 'bg-gray-100 text-gray-500' : 'bg-red-100 text-red-800'
+                                }`}>
+                                {stat.punches.some(p => p.type === 'atestado') ? 'Atestado' :
+                                  stat.punches.some(p => p.type === 'ferias') ? 'Férias' : stat.status}
+                              </span>
                             </td>
                             <td className="px-6 py-4 text-center font-mono">
                               {formatDuration(stat.totalWorkedMs)}
@@ -1451,9 +2024,22 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                               </div>
                             </td>
                             <td className="px-6 py-4 text-center font-mono">
-                              <div className={`flex items-center justify-center gap-1 ${lunchAlert ? 'text-red-600 font-bold' : ''}`}>
-                                {stat.lunchDurationMs > 0 ? formatDuration(stat.lunchDurationMs) : '--'}
-                                {lunchAlert && <AlertTriangle size={14} />}
+                              <div className={`flex flex-col items-center justify-center gap-1 ${lunchAlert ? 'text-red-600 font-bold' : ''}`}>
+                                {stat.offlineLunch ? (
+                                  <>
+                                    <span className="font-bold text-slate-600">1h (Fixo)</span>
+                                    {stat.offlineLunch.justification && (
+                                      <span className="text-[10px] text-slate-500 max-w-[100px] truncate" title={stat.offlineLunch.justification}>
+                                        {stat.offlineLunch.justification}
+                                      </span>
+                                    )}
+                                  </>
+                                ) : (
+                                  <>
+                                    {stat.lunchDurationMs > 0 ? formatDuration(stat.lunchDurationMs) : '--'}
+                                    {lunchAlert && <AlertTriangle size={14} />}
+                                  </>
+                                )}
                               </div>
                             </td>
                             <td className="px-6 py-4 text-center">
@@ -1569,12 +2155,15 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                           <th className="px-4 py-3 font-semibold text-center">Almoço</th>
                           <th className="px-4 py-3 font-semibold text-center">Trabalhado</th>
                           <th className="px-4 py-3 font-semibold text-center">Saldo</th>
+                          <th className="px-4 py-3 font-semibold text-center">Ações</th>
                         </tr>
                       </thead>
                       <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
                         {monthlyStats.map((stat, idx) => {
                           const isWeekend = stat.dayOfWeek === 'saturday' || stat.dayOfWeek === 'sunday';
                           const isAbsent = !stat.hasPunches && !isWeekend;
+                          const isAtestado = stat.punches.some(p => p.type === 'atestado');
+                          const isFerias = stat.punches.some(p => p.type === 'ferias');
 
                           return (
                             <tr key={idx} className={`hover:bg-slate-50 transition-colors ${isAbsent ? 'bg-red-50/30' : ''} ${isWeekend ? 'bg-slate-50/50' : ''}`}>
@@ -1587,11 +2176,30 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                                         stat.dayOfWeek === 'friday' ? 'Sex' :
                                           stat.dayOfWeek === 'saturday' ? 'Sáb' : 'Dom'}
                               </td>
-                              <td className="px-4 py-3 text-center">{stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-'}</td>
-                              <td className="px-4 py-3 text-center">{stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-'}</td>
-                              <td className="px-4 py-3 text-center">{stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-'}</td>
-                              <td className="px-4 py-3 text-center">{stat.exit ? formatTime(getDateFromTimestamp(stat.exit.timestamp)) : '-'}</td>
-                              <td className="px-4 py-3 text-center text-xs">{stat.lunchMs > 0 ? formatDuration(stat.lunchMs) : '-'}</td>
+                              <td className="px-4 py-3 text-center">
+                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-')}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-'))}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-'))}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.exit ? formatTime(getDateFromTimestamp(stat.exit.timestamp)) : '-')}
+                              </td>
+                              <td className="px-4 py-3 text-center text-xs">
+                                {stat.offlineLunch ? (
+                                  <div className="flex flex-col items-center">
+                                    <span className="font-bold text-slate-600">1h (Fixo)</span>
+                                    {stat.offlineLunch.justification && (
+                                      <span className="text-[10px] text-slate-500 max-w-[100px] truncate" title={stat.offlineLunch.justification}>
+                                        {stat.offlineLunch.justification}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (stat.lunchMs > 0 ? formatDuration(stat.lunchMs) : '-')}
+                              </td>
                               <td className="px-4 py-3 text-center font-bold">{stat.workedMs > 0 ? formatDuration(stat.workedMs) : '-'}</td>
                               <td className="px-4 py-3 text-center">
                                 {stat.balanceMs !== 0 ? (
@@ -1600,14 +2208,109 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                                   </span>
                                 ) : '-'}
                               </td>
+                              <td className="px-4 py-3 text-center">
+                                <button
+                                  onClick={() => openEditPunchModal(reportUserObj, stat.date.toISOString().split('T')[0], stat.punches)}
+                                  className="text-slate-400 hover:text-indigo-600 p-1 rounded transition-colors"
+                                  title="Editar Ponto"
+                                >
+                                  <Settings size={16} />
+                                </button>
+                              </td>
                             </tr>
                           );
                         })}
                       </tbody>
+                      <tfoot>
+                        {(() => {
+                          const totalBalanceMs = monthlyStats.reduce((acc, curr) => acc + curr.balanceMs, 0);
+                          const isPositive = totalBalanceMs >= 0;
+                          return (
+                            <tr className="bg-slate-100 border-t-2 border-slate-200 font-bold">
+                              <td colSpan="8" className="px-4 py-3 text-right text-slate-700 uppercase text-xs tracking-wider">Saldo Total:</td>
+                              <td colSpan="2" className={`px-4 py-3 text-center ${isPositive ? 'text-green-700 bg-green-50' : 'text-red-700 bg-red-50'}`}>
+                                {isPositive ? '+' : '-'}{formatDuration(Math.abs(totalBalanceMs))}
+                              </td>
+                            </tr>
+                          );
+                        })()}
+                      </tfoot>
                     </table>
                   </div>
                 </div>
               )}
+            </div>
+          ) : activeTab === 'holidays' ? (
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-2"><Calendar size={20} /> Gestão de Feriados</h3>
+                <button
+                  onClick={importNationalHolidays}
+                  className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 py-2 rounded-lg font-bold text-sm transition-colors"
+                >
+                  Importar Feriados Nacionais
+                </button>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex gap-4 items-end">
+                <div className="flex-1">
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Data</label>
+                  <input
+                    type="date"
+                    value={newHolidayDate}
+                    onChange={(e) => setNewHolidayDate(e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div className="flex-[2]">
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Nome do Feriado</label>
+                  <input
+                    type="text"
+                    value={newHolidayName}
+                    onChange={(e) => setNewHolidayName(e.target.value)}
+                    placeholder="Ex: Aniversário da Cidade"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <button
+                  onClick={addHoliday}
+                  className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold text-sm transition-colors h-[38px]"
+                >
+                  Adicionar
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
+                      <th className="px-4 py-3 font-semibold">Data</th>
+                      <th className="px-4 py-3 font-semibold">Nome</th>
+                      <th className="px-4 py-3 font-semibold text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
+                    {holidays.sort((a, b) => a.date.localeCompare(b.date)).map((h) => (
+                      <tr key={h.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-3 font-mono">{formatDate(new Date(h.date + 'T12:00:00'))}</td>
+                        <td className="px-4 py-3 font-bold">{h.name}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button onClick={() => deleteHoliday(h.id)} className="text-red-500 hover:text-red-700 p-1">
+                            <Trash2 size={18} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {holidays.length === 0 && (
+                      <tr>
+                        <td colSpan="3" className="px-4 py-8 text-center text-slate-400">
+                          Nenhum feriado cadastrado.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : (
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-[600px] relative z-0">
@@ -1644,10 +2347,85 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
           )
         }
 
-        {/* ADMIN TAB - Temporariamente desabilitado para debug
         {activeTab === 'admins' && (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-            Admin content here
+            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+              <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users size={20} className="text-indigo-600" /> Gestão de Usuários</h3>
+              <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600">Total: {allUsers.length}</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
+                    <th className="px-6 py-4 font-semibold">Usuário</th>
+                    <th className="px-6 py-4 font-semibold">Cidade</th>
+                    <th className="px-6 py-4 font-semibold">Função</th>
+                    <th className="px-6 py-4 font-semibold text-center">Rastreamento</th>
+                    <th className="px-6 py-4 font-semibold text-right">Ações</th>
+                  </tr>
+                </thead>
+                <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
+                  {allUsers.map((user) => (
+                    <tr key={user.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-6 py-4">
+                        <div className="font-bold text-slate-800">{user.name}</div>
+                        <div className="text-xs text-slate-400">{user.email}</div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-2 group">
+                          <span className="text-sm text-slate-600">{user.city || 'Sem cidade'}</span>
+                          <button
+                            onClick={() => openCityModal(user)}
+                            className="text-slate-300 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-all"
+                            title="Editar Cidade"
+                          >
+                            <Settings size={14} />
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${user.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-slate-100 text-slate-800'}`}>
+                          {user.role === 'admin' ? 'Administrador' : 'Técnico'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <button
+                          onClick={() => toggleTracking(user)}
+                          className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${user.trackingEnabled !== false ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}
+                        >
+                          {user.trackingEnabled !== false ? 'Ativo' : 'Inativo'}
+                        </button>
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            onClick={() => openPasswordModal(user)}
+                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                            title="Trocar Senha"
+                          >
+                            <Lock size={18} />
+                          </button>
+                          <button
+                            onClick={() => toggleAdminRole(user)}
+                            className={`p-2 rounded-lg transition-colors ${user.role === 'admin' ? 'text-purple-600 hover:bg-purple-50' : 'text-slate-400 hover:text-purple-600 hover:bg-purple-50'}`}
+                            title={user.role === 'admin' ? 'Rebaixar para Técnico' : 'Promover para Admin'}
+                          >
+                            <UserPlus size={18} />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteUser(user)}
+                            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            title="Excluir Usuário"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
         {/* MODAL DETALHES TÉCNICO (ESCALA) */}
@@ -1774,6 +2552,182 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
             </div>
           )
         }
+        {/* MODAL DE EDIÇÃO DE PONTO */}
+        {
+          showEditPunchModal && editingUser && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95">
+                <div className="bg-indigo-600 p-4 flex justify-between items-center text-white">
+                  <h3 className="font-bold flex items-center gap-2"><Settings size={20} /> Editar Ponto - {formatDate(editingDate)}</h3>
+                  <button onClick={() => setShowEditPunchModal(false)} className="hover:bg-indigo-700 p-1 rounded"><X size={20} /></button>
+                </div>
+                <div className="p-6">
+                  <p className="text-slate-600 mb-4 text-sm">
+                    Editando registros de <strong>{editingUser.name}</strong>.
+                    <br />
+                    <span className="text-xs text-red-500 font-bold">Atenção: As alterações são irreversíveis.</span>
+                  </p>
+
+                  <div className="space-y-3 mb-6 max-h-[50vh] overflow-y-auto pr-2">
+                    {editingPunches.map((punch, idx) => (
+                      <div key={idx} className="flex items-center gap-2 bg-slate-50 p-2 rounded border border-slate-200">
+                        <input
+                          type="time"
+                          value={punch.time}
+                          onChange={(e) => handlePunchChange(idx, 'time', e.target.value)}
+                          className="border border-slate-300 rounded px-2 py-1 text-sm font-mono"
+                          disabled={punch.type === 'atestado'}
+                        />
+                        <select
+                          value={punch.type}
+                          onChange={(e) => handlePunchChange(idx, 'type', e.target.value)}
+                          className="flex-1 border border-slate-300 rounded px-2 py-1 text-sm"
+                        >
+                          <option value="entrada">Entrada</option>
+                          <option value="saida_almoco">Saída Almoço</option>
+                          <option value="volta_almoco">Volta Almoço</option>
+                          <option value="saida">Saída</option>
+                          <option value="lunch_offline">Almoço Offline</option>
+                          <option value="atestado">Atestado Médico</option>
+                        </select>
+                        <button
+                          onClick={() => handleRemovePunchRow(idx)}
+                          className="text-red-500 hover:bg-red-50 p-1 rounded"
+                          title="Remover"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    ))}
+                    {editingPunches.length === 0 && <p className="text-center text-slate-400 text-sm py-4">Nenhum registro.</p>}
+                  </div>
+
+                  <div className="flex gap-2 mb-6">
+                    <button
+                      onClick={handleAddPunchRow}
+                      className="flex-1 py-2 border-2 border-dashed border-slate-300 text-slate-500 rounded-lg hover:border-indigo-500 hover:text-indigo-600 font-bold text-sm transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Clock size={16} /> Adicionar Registro
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (window.confirm("Isso removerá todos os registros do dia e marcará como Atestado. Continuar?")) {
+                          setEditingPunches([{ id: `temp_${Date.now()}`, type: 'atestado', time: '00:00', isNew: true }]);
+                        }
+                      }}
+                      className="flex-1 py-2 border-2 border-dashed border-blue-300 text-blue-500 rounded-lg hover:border-blue-500 hover:text-blue-600 font-bold text-sm transition-colors flex items-center justify-center gap-2"
+                    >
+                      <FileText size={16} /> Registrar Atestado
+                    </button>
+                  </div>
+
+                  {/* SEÇÃO DE FÉRIAS */}
+                  <div className="mb-6 border-t border-slate-100 pt-4">
+                    {!showVacationInput ? (
+                      <button
+                        onClick={() => setShowVacationInput(true)}
+                        className="w-full py-2 border-2 border-dashed border-purple-300 text-purple-500 rounded-lg hover:border-purple-500 hover:text-purple-600 font-bold text-sm transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Calendar size={16} /> Registrar Férias (Lote)
+                      </button>
+                    ) : (
+                      <div className="bg-purple-50 p-4 rounded-lg border border-purple-100 animate-in fade-in slide-in-from-top-2">
+                        <h4 className="font-bold text-purple-800 mb-2 text-sm flex items-center gap-2"><Calendar size={16} /> Registrar Férias</h4>
+                        <p className="text-xs text-purple-600 mb-3">Iniciando em <strong>{formatDate(editingDate)}</strong></p>
+
+                        <div className="flex items-end gap-2">
+                          <div className="flex-1">
+                            <label className="block text-xs font-bold text-purple-700 mb-1">Qtd. Dias</label>
+                            <input
+                              type="number"
+                              min="1"
+                              max="60"
+                              value={vacationDays}
+                              onChange={(e) => setVacationDays(parseInt(e.target.value) || 0)}
+                              className="w-full border border-purple-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+                            />
+                          </div>
+                          <button
+                            onClick={handleVacationRegistration}
+                            className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-bold text-sm h-[38px]"
+                          >
+                            Confirmar
+                          </button>
+                          <button
+                            onClick={() => setShowVacationInput(false)}
+                            className="bg-slate-200 hover:bg-slate-300 text-slate-600 px-3 py-2 rounded-lg font-bold text-sm h-[38px]"
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => setShowEditPunchModal(false)}
+                      className="flex-1 py-3 text-slate-600 font-bold hover:bg-slate-100 rounded-lg transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={savePunchEdits}
+                      className="flex-1 py-3 bg-indigo-600 text-white font-bold hover:bg-indigo-700 rounded-lg shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
+                    >
+                      Salvar Alterações
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        }
+        {/* Modal de Edição de Cidade */}
+        {showCityModal && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+              <div className="bg-indigo-600 p-6 text-white flex justify-between items-center">
+                <h3 className="text-xl font-bold flex items-center gap-2">
+                  <MapPin size={24} /> Editar Cidade
+                </h3>
+                <button onClick={() => setShowCityModal(false)} className="text-white/80 hover:text-white">
+                  <X size={24} />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <p className="text-sm text-slate-600">
+                  Defina a cidade para o técnico <strong>{selectedUserForCity?.name}</strong>.
+                </p>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">Cidade</label>
+                  <input
+                    type="text"
+                    value={newCity}
+                    onChange={(e) => setNewCity(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    placeholder="Ex: São Paulo"
+                    autoFocus
+                  />
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={() => setShowCityModal(false)}
+                    className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleUpdateCity}
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
+                  >
+                    Salvar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main >
     </div >
   );
