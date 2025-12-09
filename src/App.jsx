@@ -21,8 +21,12 @@ import {
   updateDoc,
   deleteDoc,
   writeBatch,
-  getDoc
+
+  getDoc,
+  arrayUnion
 } from 'firebase/firestore';
+import { getMessaging, getToken, onMessage } from 'firebase/messaging';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import {
   MapPin,
   Clock,
@@ -48,13 +52,16 @@ import {
   Calendar,
   Settings,
   Save,
-  Trash2
+  Trash2,
+  BellRing,
+  Loader2
 } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Circle, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { Capacitor } from '@capacitor/core';
 import { BackgroundGeolocation } from '@capgo/background-geolocation';
+import { PushNotifications } from '@capacitor/push-notifications';
 
 // Fix Leaflet marker icon issue
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
@@ -83,6 +90,13 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const functions = getFunctions(app);
+let messaging;
+try {
+  messaging = getMessaging(app);
+} catch (e) {
+  console.log("Messaging not supported (probably running in a non-browser env or during build)", e);
+}
 
 // ID fixo para o aplicativo (usado nas coleções do banco)
 const appId = "cartao-de-ponto-5e801";
@@ -104,9 +118,43 @@ const formatDate = (date) => {
 };
 
 const formatDuration = (ms) => {
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  return `${h}h ${m}m`;
+  if (!ms) return '0h 0m';
+  const isNegative = ms < 0;
+  const absMs = Math.abs(ms);
+  const hours = Math.floor(absMs / 3600000);
+  const minutes = Math.floor((absMs % 3600000) / 60000);
+  return `${isNegative ? '-' : ''}${hours}h ${minutes}m`;
+};
+
+const calculateDistance = (lat1, lng1, lat2, lng2) => {
+  const R = 6371e3; // Raio da Terra em metros
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lng2 - lng1) * Math.PI / 180;
+
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) *
+    Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c; // Distância em metros
+};
+
+const LocationMarker = ({ position, setPosition, radius }) => {
+  const map = useMapEvents({
+    click(e) {
+      setPosition({ ...position, lat: e.latlng.lat, lng: e.latlng.lng });
+      map.flyTo(e.latlng, map.getZoom());
+    },
+  });
+
+  return position ? (
+    <>
+      <Marker position={[position.lat, position.lng]} />
+      <Circle center={[position.lat, position.lng]} radius={radius || 200} pathOptions={{ color: 'green', fillColor: 'green' }} />
+    </>
+  ) : null;
 };
 
 const getDateFromTimestamp = (timestamp) => {
@@ -173,6 +221,33 @@ const LoginScreen = ({ onLogin }) => {
       onLogin(foundUser);
     } else {
       setError('Senha incorreta.');
+    }
+  };
+
+  const handleConfirmOvertime = async (justification) => {
+    if (!currentUserData || !currentUserData.id) return;
+
+    try {
+      setLoading(true);
+      // 1. Registra a justificativa na coleção de 'overtime_logs' (nova coleção para auditoria)
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'overtime_logs'), {
+        userId: currentUserData.id,
+        userName: currentUserData.name,
+        timestamp: serverTimestamp(),
+        justification: justification,
+        date: new Date().toISOString().split('T')[0]
+      });
+
+      // 2. Opcional: Atualizar o status do usuário ou adicionar flag no registro de ponto do dia
+      // Por enquanto, apenas logamos.
+
+      alert('Hora extra confirmada e justificada com sucesso!');
+      setShowOvertimeModal(false);
+    } catch (error) {
+      console.error("Erro ao confirmar hora extra:", error);
+      alert("Erro ao salvar justificativa. Tente novamente.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -364,6 +439,57 @@ const LoginScreen = ({ onLogin }) => {
   );
 };
 
+// --- COMPONENTES AUXILIARES ---
+const OvertimeModal = ({ onClose, onConfirm, onClockOut }) => {
+  const [justification, setJustification] = useState('');
+
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[3000] p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-300">
+        <div className="bg-amber-500 p-6 text-white text-center">
+          <Clock size={48} className="mx-auto mb-2 opacity-90" />
+          <h2 className="text-2xl font-bold">Fim de Expediente</h2>
+          <p className="opacity-90 mt-1">Seu horário de trabalho encerrou.</p>
+        </div>
+
+        <div className="p-6 space-y-6">
+          <div className="text-center text-slate-600">
+            <p>Você ainda está trabalhando? Se sim, é necessário justificar a hora extra.</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-bold text-slate-700 mb-2">Motivo da Hora Extra</label>
+            <textarea
+              value={justification}
+              onChange={(e) => setJustification(e.target.value)}
+              placeholder="Ex: Finalizando instalação no cliente X..."
+              className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-amber-500 outline-none resize-none h-32"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <button
+              onClick={onClockOut}
+              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 px-4 rounded-xl transition-colors flex flex-col items-center justify-center gap-1"
+            >
+              <LogOut size={20} />
+              <span>Encerrar Agora</span>
+            </button>
+            <button
+              onClick={() => onConfirm(justification)}
+              disabled={!justification.trim()}
+              className={`font-bold py-3 px-4 rounded-xl transition-colors flex flex-col items-center justify-center gap-1 text-white ${!justification.trim() ? 'bg-amber-300 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-600 shadow-lg shadow-amber-500/30'}`}
+            >
+              <CheckCircle size={20} />
+              <span>Confirmar Hora Extra</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // 2. Visão do Técnico (Mobile First)
 const TechnicianView = ({ user, currentUserData, onLogout }) => {
   const [loading, setLoading] = useState(false);
@@ -380,8 +506,33 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
   const [showOfflineLunchModal, setShowOfflineLunchModal] = useState(false);
   const [offlineLunchJustification, setOfflineLunchJustification] = useState('');
 
+  // Estados para Hora Extra (Notificação)
+  const [showOvertimeModal, setShowOvertimeModal] = useState(false);
+
   // Ref para o watcher de GPS
   const watchIdRef = useRef(null);
+
+  // Listener para Notificações (Unificado Web/Native via CustomEvent)
+  useEffect(() => {
+    const handlePush = (event) => {
+      const payload = event.detail;
+      console.log('Notificação recebida no TechnicianView:', payload);
+
+      // Verifica se é ação de hora extra (pode vir em data ou notification.data dependendo da origem)
+      const action = payload.data?.action || payload.action;
+
+      if (action === 'overtime_confirm') {
+        setShowOvertimeModal(true);
+      } else {
+        // Alerta padrão apenas se não for o modal
+        // (Opcional: remover se o App já mostra alert global, mas aqui é específico do técnico)
+        // alert(`🔔 ${payload.title || payload.notification?.title}\n${payload.body || payload.notification?.body}`);
+      }
+    };
+
+    window.addEventListener('native-push-received', handlePush);
+    return () => window.removeEventListener('native-push-received', handlePush);
+  }, []);
 
   // RASTREAMENTO EM TEMPO REAL
   useEffect(() => {
@@ -514,6 +665,23 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
       const myPunchesToday = allPunches.filter(p => {
         const pDate = getDateFromTimestamp(p.timestamp);
         return (p.userEmail === currentUserData.email) && pDate && pDate.toDateString() === today;
+      }).map(p => {
+        // Verifica Geofencing
+        let isOutOfRange = false;
+        let distance = 0;
+        if (p.location && currentUserData.allowedLocation) {
+          // Assuming calculateDistance is defined elsewhere in the file or imported
+          distance = calculateDistance(
+            p.location.lat,
+            p.location.lng,
+            currentUserData.allowedLocation.lat,
+            currentUserData.allowedLocation.lng
+          );
+          if (distance > (currentUserData.allowedLocation.radius || 200)) {
+            isOutOfRange = true;
+          }
+        }
+        return { ...p, isOutOfRange, distanceFromAllowed: distance };
       });
 
       setTodayPunches(myPunchesToday);
@@ -538,10 +706,11 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
     }
 
     // VERIFICAÇÃO DE HORA EXTRA (apenas para saída)
-    if (type === 'saida' && currentUserData?.schedule) {
+    const userSchedule = currentUserData?.workSchedule || currentUserData?.schedule;
+    if (type === 'saida' && userSchedule) {
       const now = new Date();
       const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][now.getDay()];
-      const todaySchedule = currentUserData.schedule[dayOfWeek];
+      const todaySchedule = userSchedule[dayOfWeek];
 
       if (todaySchedule && todaySchedule.active && todaySchedule.end) {
         const [scheduleHour, scheduleMinute] = todaySchedule.end.split(':').map(Number);
@@ -665,6 +834,7 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
 
     if (lastPunch.type === 'saida_almoco') return 'volta_almoco';
     if (lastPunch.type === 'volta_almoco') return 'saida';
+    if (lastPunch.type === 'justificativa_hora_extra') return 'saida';
     if (lastPunch.type === 'saida') return 'extra_start';
     return 'entrada';
   };
@@ -682,6 +852,21 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
       {label}
     </button>
   );
+
+  // Handlers para o Modal de Notificação de Hora Extra
+  const handleJustifyOvertimeOnly = async (justificationText) => {
+    if (!justificationText.trim()) return;
+
+    // Salva punch especial para justificar e parar notificações
+    await proceedWithPunch('justificativa_hora_extra', justificationText);
+    setShowOvertimeModal(false);
+  };
+
+  const handleClockOutFromOvertime = () => {
+    setShowOvertimeModal(false);
+    handlePunch('saida');
+  };
+
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
@@ -922,6 +1107,15 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
         </div>
       )}
 
+      {/* Modal de Notificação de Hora Extra (Vindo do Push) */}
+      {showOvertimeModal && (
+        <OvertimeModal
+          onClose={() => setShowOvertimeModal(false)}
+          onConfirm={handleJustifyOvertimeOnly}
+          onClockOut={handleClockOutFromOvertime}
+        />
+      )}
+
     </div>
   );
 };
@@ -955,8 +1149,9 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
   const openTechModal = (user) => {
     setSelectedTech(user);
     // Carrega escala existente ou usa padrão
-    if (user.workSchedule) {
-      setTechSchedule(user.workSchedule);
+    const existingSchedule = user.workSchedule || user.schedule;
+    if (existingSchedule) {
+      setTechSchedule(existingSchedule);
     } else {
       // Reset para padrão
       setTechSchedule({
@@ -1010,30 +1205,165 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     }
   };
 
-  // Alterar Senha
+  // Alterar Credenciais (Senha e Email)
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [selectedUserForPassword, setSelectedUserForPassword] = useState(null);
   const [newPassword, setNewPassword] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+
+  // Estado para Modal de Rota
+  const [showRouteModal, setShowRouteModal] = useState(false);
+  const [selectedRoutePunches, setSelectedRoutePunches] = useState([]);
+  const [selectedRouteUser, setSelectedRouteUser] = useState(null);
+
+  // Estado para Modal de Seleção de Local (Geofencing)
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [selectedUserForLocation, setSelectedUserForLocation] = useState(null);
+  const [tempLocation, setTempLocation] = useState(null); // { lat, lng, radius }
 
   const openPasswordModal = (user) => {
     setSelectedUserForPassword(user);
     setNewPassword('');
+    setNewEmail(user.email || '');
     setShowPasswordModal(true);
   };
 
-  const handleChangePassword = async () => {
-    if (!newPassword.trim()) return alert("Digite uma nova senha.");
+  const handleUpdateUserCredentials = async () => {
+    if (!newPassword.trim() && !newEmail.trim()) return alert("Digite uma nova senha ou email.");
     if (!selectedUserForPassword) return;
 
     try {
-      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', selectedUserForPassword.id), {
-        password: newPassword.trim()
-      });
-      alert(`Senha de ${selectedUserForPassword.name} alterada com sucesso!`);
+      const updates = {};
+      if (newPassword.trim()) updates.password = newPassword.trim();
+      if (newEmail.trim()) updates.email = newEmail.trim();
+
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', selectedUserForPassword.id), updates);
+      alert(`Dados de ${selectedUserForPassword.name} atualizados com sucesso!`);
       setShowPasswordModal(false);
     } catch (error) {
-      console.error("Erro ao alterar senha:", error);
-      alert("Erro ao alterar senha.");
+      console.error("Erro ao atualizar credenciais:", error);
+      alert("Erro ao atualizar credenciais.");
+    }
+  };
+
+  const openRouteModal = (punches, userName) => {
+    // Filtra apenas punches com localização válida
+    const validPunches = punches.filter(p => p.location && p.location.lat && p.location.lng);
+
+    if (validPunches.length === 0) {
+      alert("Nenhum registro de localização encontrado para este dia.");
+      return;
+    }
+
+    setSelectedRoutePunches(validPunches);
+    setSelectedRouteUser(userName);
+    setShowRouteModal(true);
+  };
+
+  const openLocationPicker = (user) => {
+    setSelectedUserForLocation(user);
+    // Se já tiver local, usa. Se não, usa centro padrão (ex: Brasil ou última localização conhecida)
+    setTempLocation(user.allowedLocation || { lat: -14.2350, lng: -51.9253, radius: 200 });
+    setShowLocationPicker(true);
+  };
+
+  const handleSaveLocation = async () => {
+    if (!selectedUserForLocation || !tempLocation) return;
+
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', selectedUserForLocation.id), {
+        allowedLocation: tempLocation
+      });
+      alert(`Local de trabalho de ${selectedUserForLocation.name} definido com sucesso!`);
+      setShowLocationPicker(false);
+    } catch (error) {
+      console.error("Erro ao salvar local:", error);
+      alert("Erro ao salvar local de trabalho.");
+    }
+  };
+
+  // Estado para Notificações
+  const [notificationTitle, setNotificationTitle] = useState('');
+  const [notificationBody, setNotificationBody] = useState('');
+  const [selectedUsersForNotification, setSelectedUsersForNotification] = useState([]);
+  const [isSendingNotification, setIsSendingNotification] = useState(false);
+
+  const handleSendNotification = async () => {
+    if (selectedUsersForNotification.length === 0 || !notificationTitle || !notificationBody) return;
+
+    setIsSendingNotification(true);
+    try {
+      const sendManualNotification = httpsCallable(functions, 'sendManualNotification');
+      const result = await sendManualNotification({
+        userIds: selectedUsersForNotification,
+        title: notificationTitle,
+        body: notificationBody
+      });
+
+      if (result.data.success) {
+        alert('Notificação enviada com sucesso!');
+        setNotificationTitle('');
+        setNotificationBody('');
+        setSelectedUsersForNotification([]);
+      } else {
+        alert('Erro ao enviar notificação: ' + (result.data.message || 'Erro desconhecido'));
+      }
+    } catch (error) {
+      console.error("Erro ao enviar notificação:", error);
+      alert(`Erro ao enviar notificação:\nCódigo: ${error.code}\nMensagem: ${error.message}\n\nVerifique o console para mais detalhes.`);
+    } finally {
+      setIsSendingNotification(false);
+    }
+  };
+
+  const handleForceCheck = async () => {
+    if (!confirm('Deseja forçar a verificação de atrasos e horas extras agora? Isso enviará notificações para quem estiver irregular.')) return;
+
+    setIsSendingNotification(true);
+    try {
+      // Use the imported httpsCallable directly
+      const forceCheck = httpsCallable(functions, 'forceCheckSchedules');
+      const result = await forceCheck();
+
+      alert(`Verificação concluída!\nNotificações enviadas: ${result.data.notificationsSent}`);
+    } catch (error) {
+      console.error("Erro ao forçar verificação:", error);
+      alert(`Erro ao verificar: ${error.message}`);
+    } finally {
+      setIsSendingNotification(false);
+    }
+  };
+
+
+  const [delayWindow, setDelayWindow] = useState(60); // Default 60 min
+  const [overtimeWindow, setOvertimeWindow] = useState(120); // Default 120 min
+
+  useEffect(() => {
+    const loadSettings = async () => {
+      try {
+        const settingsDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'notifications'));
+        if (settingsDoc.exists()) {
+          const data = settingsDoc.data();
+          if (data.delayWindow) setDelayWindow(data.delayWindow);
+          if (data.overtimeWindow) setOvertimeWindow(data.overtimeWindow);
+        }
+      } catch (error) {
+        console.error("Erro ao carregar configurações:", error);
+      }
+    };
+    loadSettings();
+  }, []);
+
+  const saveNotificationSettings = async () => {
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'notifications'), {
+        delayWindow,
+        overtimeWindow
+      }, { merge: true });
+      alert('Configurações salvas com sucesso!');
+    } catch (error) {
+      console.error("Erro ao salvar configurações:", error);
+      alert('Erro ao salvar configurações.');
     }
   };
 
@@ -1565,22 +1895,39 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
 
       const userKey = p.userEmail;
 
-      if (statsMap[userKey]) {
-        statsMap[userKey].punches.push(p);
-      } else {
-        // Só adiciona se for de um técnico (não admin)
-        const userObj = allUsers.find(u => u.email === p.userEmail);
-        if (userObj && userObj.role === 'tech') {
-          if (p.userEmail) {
-            statsMap[userKey] = {
-              name: p.userName || 'Desconhecido',
-              email: p.userEmail,
-              punches: [p],
-              totalWorkedMs: 0, lunchDurationMs: 0, status: 'Offline',
-              lastAction: null, lastLocation: null, completed: false, offlineLunch: null,
-              city: userObj.city || 'Sem cidade'
-            };
+      // Encontra o usuário para verificar geofencing
+      const userObj = allUsers.find(u => u.email === p.userEmail);
+
+      if (userObj && userObj.role === 'tech') {
+        // Verifica Geofencing
+        let isOutOfRange = false;
+        let distanceFromAllowed = 0;
+        if (p.location && userObj.allowedLocation) {
+          distanceFromAllowed = calculateDistance(
+            p.location.lat,
+            p.location.lng,
+            userObj.allowedLocation.lat,
+            userObj.allowedLocation.lng
+          );
+          if (distanceFromAllowed > (userObj.allowedLocation.radius || 200)) {
+            isOutOfRange = true;
           }
+        }
+
+        const punchWithGeo = { ...p, isOutOfRange, distanceFromAllowed };
+
+        if (statsMap[userKey]) {
+          statsMap[userKey].punches.push(punchWithGeo);
+        } else {
+          // Fallback caso não tenha sido inicializado (ex: técnico deletado mas com pontos)
+          statsMap[userKey] = {
+            name: p.userName || 'Desconhecido',
+            email: p.userEmail,
+            punches: [punchWithGeo],
+            totalWorkedMs: 0, lunchDurationMs: 0, status: 'Offline',
+            lastAction: null, lastLocation: null, completed: false, offlineLunch: null,
+            city: userObj.city || 'Sem cidade'
+          };
         }
       }
     });
@@ -1779,12 +2126,13 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       const offlineLunch = dayPunches.find(p => p.type === 'lunch_offline');
       const atestado = dayPunches.find(p => p.type === 'atestado');
       const ferias = dayPunches.find(p => p.type === 'ferias');
+      const folga = dayPunches.find(p => p.type === 'folga');
 
       let workedMs = 0;
       let lunchMs = 0;
 
-      if (atestado || ferias) {
-        // Se tem atestado ou férias, tudo é zero
+      if (atestado || ferias || folga) {
+        // Se tem atestado, férias ou folga, tudo é zero
         workedMs = 0;
         lunchMs = 0;
       } else if (offlineLunch) {
@@ -1827,8 +2175,8 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][currentDayDate.getDay()];
       let expectedMs = getExpectedWorkHours(dayOfWeek, reportUserObj, currentDayDate);
 
-      // Se for atestado ou férias, a expectativa é 0
-      if (atestado || ferias) expectedMs = 0;
+      // Se for atestado, férias ou folga, a expectativa é 0
+      if (atestado || ferias || folga) expectedMs = 0;
 
       const balanceMs = workedMs - expectedMs;
 
@@ -1902,13 +2250,21 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
           </button>
           <button
             onClick={() => setActiveTab('admins')}
-            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'admins' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'admins' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}
           >
-            <div className="flex items-center gap-2"><Lock size={18} /> Administradores</div>
+            <Users size={20} />
+            <span className="font-semibold">Administradores</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('notifications')}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'notifications' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}
+          >
+            <Mail size={20} />
+            <span className="font-semibold">Notificações</span>
           </button>
           <button
             onClick={() => setActiveTab('reports')}
-            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'reports' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'reports' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}
           >
             <div className="flex items-center gap-2"><FileText size={18} /> Relatórios</div>
           </button>
@@ -1922,7 +2278,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
 
 
         {
-          activeTab === 'dashboard' ? (
+          activeTab === 'dashboard' && (
             <>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
                 <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex items-center gap-4">
@@ -2008,13 +2364,15 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                             <td className="px-6 py-4">
                               <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${stat.punches.some(p => p.type === 'atestado') ? 'bg-blue-100 text-blue-800' :
                                 stat.punches.some(p => p.type === 'ferias') ? 'bg-purple-100 text-purple-800' :
-                                  stat.status === 'Trabalhando' ? 'bg-green-100 text-green-800' :
-                                    stat.status === 'Em Almoço' ? 'bg-yellow-100 text-yellow-800' :
-                                      stat.status === 'Finalizado' ? 'bg-slate-100 text-slate-800' :
-                                        stat.status === 'Offline' ? 'bg-gray-100 text-gray-500' : 'bg-red-100 text-red-800'
+                                  stat.punches.some(p => p.type === 'folga') ? 'bg-teal-100 text-teal-800' :
+                                    stat.status === 'Trabalhando' ? 'bg-green-100 text-green-800' :
+                                      stat.status === 'Em Almoço' ? 'bg-yellow-100 text-yellow-800' :
+                                        stat.status === 'Finalizado' ? 'bg-slate-100 text-slate-800' :
+                                          stat.status === 'Offline' ? 'bg-gray-100 text-gray-500' : 'bg-red-100 text-red-800'
                                 }`}>
                                 {stat.punches.some(p => p.type === 'atestado') ? 'Atestado' :
-                                  stat.punches.some(p => p.type === 'ferias') ? 'Férias' : stat.status}
+                                  stat.punches.some(p => p.type === 'ferias') ? 'Férias' :
+                                    stat.punches.some(p => p.type === 'folga') ? 'Folga' : stat.status}
                               </span>
                             </td>
                             <td className="px-6 py-4 text-center font-mono">
@@ -2046,10 +2404,20 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                               {isOvertime ? <span className="text-red-600 font-bold text-xs bg-red-50 px-2 py-1 rounded border border-red-100">Sim ({formatDuration(stat.totalWorkedMs - 28800000)})</span> : <span className="text-slate-400">-</span>}
                             </td>
                             <td className="px-6 py-4 text-right">
-                              {stat.lastLocation ? (
-                                <a href={`https://www.google.com/maps/search/?api=1&query=${stat.lastLocation.lat},${stat.lastLocation.lng}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline text-xs font-semibold">
-                                  <MapPin size={14} /> Ver Mapa
-                                </a>
+                              {stat.punches.some(p => p.location) ? (
+                                <div className="flex items-center justify-end gap-2">
+                                  {stat.punches.some(p => p.isOutOfRange) && (
+                                    <span title="Atenção: Registros fora do local permitido!" className="text-yellow-500 cursor-help">
+                                      <AlertTriangle size={16} />
+                                    </span>
+                                  )}
+                                  <button
+                                    onClick={() => openRouteModal(stat.punches, stat.name)}
+                                    className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline text-xs font-semibold"
+                                  >
+                                    <MapPin size={14} /> Ver Mapa
+                                  </button>
+                                </div>
                               ) : <span className="text-slate-400 text-xs">Sem GPS</span>}
                             </td>
                             <td className="px-6 py-4 text-center">
@@ -2104,248 +2472,435 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                 </div>
               </div>
             </>
-          ) : activeTab === 'reports' ? (
-            <div className="space-y-6">
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2"><FileText size={20} className="text-indigo-600" /> Gerar Relatório Mensal</h2>
-                <div className="flex flex-col md:flex-row gap-4 items-end">
-                  <div className="flex-1">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Mês de Referência</label>
-                    <input
-                      type="month"
-                      value={reportMonth}
-                      onChange={(e) => setReportMonth(e.target.value)}
-                      className="w-full bg-white border border-slate-300 rounded-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Colaborador</label>
-                    <select
-                      value={reportUser}
-                      onChange={(e) => setReportUser(e.target.value)}
-                      className="w-full bg-white border border-slate-300 rounded-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-                    >
-                      <option value="">Selecione um técnico...</option>
-                      {allUsers.filter(u => u.role !== 'admin').map(u => (
-                        <option key={u.id} value={u.id}>{u.name}</option>
-                      ))}
-                    </select>
-                  </div>
+          )
+        }
+
+        {activeTab === 'map' && (
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-[600px] relative z-0">
+            <MapContainer center={[-14.2350, -51.9253]} zoom={4} style={{ height: '100%', width: '100%' }}>
+              <TileLayer
+                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              />
+              {allUsers.map(user => (
+                user.currentLocation && (
+                  <Marker key={user.id} position={[user.currentLocation.lat, user.currentLocation.lng]}>
+                    <Popup>
+                      <div className="text-center">
+                        <strong className="block text-lg">{user.name}</strong>
+                        <span className="text-xs text-slate-500">{user.email}</span>
+                        <br />
+                        <span className="text-xs text-slate-400">
+                          Visto em: {user.lastSeen ? formatTime(user.lastSeen.toDate()) : 'Desconhecido'}
+                        </span>
+                      </div>
+                    </Popup>
+                  </Marker>
+                )
+              ))}
+            </MapContainer>
+            {allUsers.filter(u => u.currentLocation).length === 0 && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-[1000] pointer-events-none">
+                <div className="bg-white p-4 rounded-lg shadow-lg text-center">
+                  <p className="font-bold text-slate-700">Nenhum técnico online com GPS ativo.</p>
                 </div>
               </div>
+            )}
+          </div>
+        )}
 
-              {reportUser && (
-                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                  <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
-                    <h3 className="font-bold text-slate-700">Detalhamento de Ponto</h3>
-                    <div className="text-sm text-slate-500">
-                      Total Horas: <strong className="text-slate-800">{formatDuration(monthlyStats.reduce((acc, curr) => acc + curr.workedMs, 0))}</strong>
-                    </div>
+        {activeTab === 'reports' && (
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+              <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2"><FileText size={20} className="text-indigo-600" /> Gerar Relatório Mensal</h2>
+              <div className="flex flex-col md:flex-row gap-4 items-end">
+                <div className="flex-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Mês de Referência</label>
+                  <input
+                    type="month"
+                    value={reportMonth}
+                    onChange={(e) => setReportMonth(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Colaborador</label>
+                  <select
+                    value={reportUser}
+                    onChange={(e) => setReportUser(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                  >
+                    <option value="">Selecione um técnico...</option>
+                    {allUsers.filter(u => u.role !== 'admin').map(u => (
+                      <option key={u.id} value={u.id}>{u.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {reportUser && (
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                  <h3 className="font-bold text-slate-700">Detalhamento de Ponto</h3>
+                  <div className="text-sm text-slate-500">
+                    Total Horas: <strong className="text-slate-800">{formatDuration(monthlyStats.reduce((acc, curr) => acc + curr.workedMs, 0))}</strong>
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
-                          <th className="px-4 py-3 font-semibold">Data</th>
-                          <th className="px-4 py-3 font-semibold">Dia</th>
-                          <th className="px-4 py-3 font-semibold text-center">Entrada</th>
-                          <th className="px-4 py-3 font-semibold text-center">Saída Almoço</th>
-                          <th className="px-4 py-3 font-semibold text-center">Volta Almoço</th>
-                          <th className="px-4 py-3 font-semibold text-center">Saída</th>
-                          <th className="px-4 py-3 font-semibold text-center">Almoço</th>
-                          <th className="px-4 py-3 font-semibold text-center">Trabalhado</th>
-                          <th className="px-4 py-3 font-semibold text-center">Saldo</th>
-                          <th className="px-4 py-3 font-semibold text-center">Ações</th>
-                        </tr>
-                      </thead>
-                      <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
-                        {monthlyStats.map((stat, idx) => {
-                          const isWeekend = stat.dayOfWeek === 'saturday' || stat.dayOfWeek === 'sunday';
-                          const isAbsent = !stat.hasPunches && !isWeekend;
-                          const isAtestado = stat.punches.some(p => p.type === 'atestado');
-                          const isFerias = stat.punches.some(p => p.type === 'ferias');
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
+                        <th className="px-4 py-3 font-semibold">Data</th>
+                        <th className="px-4 py-3 font-semibold">Dia</th>
+                        <th className="px-4 py-3 font-semibold text-center">Entrada</th>
+                        <th className="px-4 py-3 font-semibold text-center">Saída Almoço</th>
+                        <th className="px-4 py-3 font-semibold text-center">Volta Almoço</th>
+                        <th className="px-4 py-3 font-semibold text-center">Saída</th>
+                        <th className="px-4 py-3 font-semibold text-center">Almoço</th>
+                        <th className="px-4 py-3 font-semibold text-center">Trabalhado</th>
+                        <th className="px-4 py-3 font-semibold text-center">Saldo</th>
+                        <th className="px-4 py-3 font-semibold text-center">Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
+                      {monthlyStats.map((stat, idx) => {
+                        const isWeekend = stat.dayOfWeek === 'saturday' || stat.dayOfWeek === 'sunday';
+                        const isAbsent = !stat.hasPunches && !isWeekend;
+                        const isAtestado = stat.punches.some(p => p.type === 'atestado');
+                        const isFerias = stat.punches.some(p => p.type === 'ferias');
+                        const isFolga = stat.punches.some(p => p.type === 'folga');
 
-                          return (
-                            <tr key={idx} className={`hover:bg-slate-50 transition-colors ${isAbsent ? 'bg-red-50/30' : ''} ${isWeekend ? 'bg-slate-50/50' : ''}`}>
-                              <td className="px-4 py-3 font-mono text-xs">{formatDate(stat.date)}</td>
-                              <td className="px-4 py-3 text-xs uppercase font-bold text-slate-500">
-                                {stat.dayOfWeek === 'monday' ? 'Seg' :
-                                  stat.dayOfWeek === 'tuesday' ? 'Ter' :
-                                    stat.dayOfWeek === 'wednesday' ? 'Qua' :
-                                      stat.dayOfWeek === 'thursday' ? 'Qui' :
-                                        stat.dayOfWeek === 'friday' ? 'Sex' :
-                                          stat.dayOfWeek === 'saturday' ? 'Sáb' : 'Dom'}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-')}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-'))}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-'))}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : (stat.exit ? formatTime(getDateFromTimestamp(stat.exit.timestamp)) : '-')}
-                              </td>
-                              <td className="px-4 py-3 text-center text-xs">
-                                {stat.offlineLunch ? (
+                        return (
+                          <tr key={idx} className={`hover:bg-slate-50 transition-colors ${isAbsent ? 'bg-red-50/30' : ''} ${isWeekend ? 'bg-slate-50/50' : ''}`}>
+                            <td className="px-4 py-3 font-mono text-xs">{formatDate(stat.date)}</td>
+                            <td className="px-4 py-3 text-xs uppercase font-bold text-slate-500">
+                              {stat.dayOfWeek === 'monday' ? 'Seg' :
+                                stat.dayOfWeek === 'tuesday' ? 'Ter' :
+                                  stat.dayOfWeek === 'wednesday' ? 'Qua' :
+                                    stat.dayOfWeek === 'thursday' ? 'Qui' :
+                                      stat.dayOfWeek === 'friday' ? 'Sex' :
+                                        stat.dayOfWeek === 'saturday' ? 'Sáb' : 'Dom'}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-')}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-'))}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-'))}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (
+                                stat.exit ? (
                                   <div className="flex flex-col items-center">
-                                    <span className="font-bold text-slate-600">1h (Fixo)</span>
-                                    {stat.offlineLunch.justification && (
-                                      <span className="text-[10px] text-slate-500 max-w-[100px] truncate" title={stat.offlineLunch.justification}>
-                                        {stat.offlineLunch.justification}
+                                    <span>{formatTime(getDateFromTimestamp(stat.exit.timestamp))}</span>
+                                    {stat.exit.justification && (
+                                      <span className="text-[10px] text-red-500 max-w-[100px] truncate" title={stat.exit.justification}>
+                                        {stat.exit.justification}
                                       </span>
                                     )}
                                   </div>
-                                ) : (stat.lunchMs > 0 ? formatDuration(stat.lunchMs) : '-')}
-                              </td>
-                              <td className="px-4 py-3 text-center font-bold">{stat.workedMs > 0 ? formatDuration(stat.workedMs) : '-'}</td>
-                              <td className="px-4 py-3 text-center">
-                                {stat.balanceMs !== 0 ? (
-                                  <span className={`text-xs font-bold px-2 py-1 rounded ${stat.balanceMs > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                    {stat.balanceMs > 0 ? '+' : ''}{formatDuration(stat.balanceMs)}
-                                  </span>
-                                ) : '-'}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                <button
-                                  onClick={() => openEditPunchModal(reportUserObj, stat.date.toISOString().split('T')[0], stat.punches)}
-                                  className="text-slate-400 hover:text-indigo-600 p-1 rounded transition-colors"
-                                  title="Editar Ponto"
-                                >
-                                  <Settings size={16} />
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                      <tfoot>
-                        {(() => {
-                          const totalBalanceMs = monthlyStats.reduce((acc, curr) => acc + curr.balanceMs, 0);
-                          const isPositive = totalBalanceMs >= 0;
-                          return (
-                            <tr className="bg-slate-100 border-t-2 border-slate-200 font-bold">
-                              <td colSpan="8" className="px-4 py-3 text-right text-slate-700 uppercase text-xs tracking-wider">Saldo Total:</td>
-                              <td colSpan="2" className={`px-4 py-3 text-center ${isPositive ? 'text-green-700 bg-green-50' : 'text-red-700 bg-red-50'}`}>
-                                {isPositive ? '+' : '-'}{formatDuration(Math.abs(totalBalanceMs))}
-                              </td>
-                            </tr>
-                          );
-                        })()}
-                      </tfoot>
-                    </table>
-                  </div>
+                                ) : '-'
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-center text-xs">
+                              {stat.offlineLunch ? (
+                                <div className="flex flex-col items-center">
+                                  <span className="font-bold text-slate-600">1h (Fixo)</span>
+                                  {stat.offlineLunch.justification && (
+                                    <span className="text-[10px] text-slate-500 max-w-[100px] truncate" title={stat.offlineLunch.justification}>
+                                      {stat.offlineLunch.justification}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (stat.lunchMs > 0 ? formatDuration(stat.lunchMs) : '-')}
+                            </td>
+                            <td className="px-4 py-3 text-center font-bold">{stat.workedMs > 0 ? formatDuration(stat.workedMs) : '-'}</td>
+                            <td className="px-4 py-3 text-center">
+                              {stat.balanceMs !== 0 ? (
+                                <span className={`text-xs font-bold px-2 py-1 rounded ${stat.balanceMs > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                  {stat.balanceMs > 0 ? '+' : ''}{formatDuration(stat.balanceMs)}
+                                </span>
+                              ) : '-'}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <button
+                                onClick={() => openEditPunchModal(reportUserObj, stat.date.toISOString().split('T')[0], stat.punches)}
+                                className="text-slate-400 hover:text-indigo-600 p-1 rounded transition-colors"
+                                title="Editar Ponto"
+                              >
+                                <Settings size={16} />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      {(() => {
+                        const totalBalanceMs = monthlyStats.reduce((acc, curr) => acc + curr.balanceMs, 0);
+                        const isPositive = totalBalanceMs >= 0;
+                        return (
+                          <tr className="bg-slate-100 border-t-2 border-slate-200 font-bold">
+                            <td colSpan="8" className="px-4 py-3 text-right text-slate-700 uppercase text-xs tracking-wider">Saldo Total:</td>
+                            <td colSpan="2" className={`px-4 py-3 text-center ${isPositive ? 'text-green-700 bg-green-50' : 'text-red-700 bg-red-50'}`}>
+                              {isPositive ? '+' : '-'}{formatDuration(Math.abs(totalBalanceMs))}
+                            </td>
+                          </tr>
+                        );
+                      })()}
+                    </tfoot>
+                  </table>
                 </div>
-              )}
-            </div>
-          ) : activeTab === 'holidays' ? (
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden p-6">
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-2"><Calendar size={20} /> Gestão de Feriados</h3>
-                <button
-                  onClick={importNationalHolidays}
-                  className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 py-2 rounded-lg font-bold text-sm transition-colors"
-                >
-                  Importar Feriados Nacionais
-                </button>
               </div>
-
-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex gap-4 items-end">
-                <div className="flex-1">
-                  <label className="block text-xs font-bold text-slate-500 mb-1">Data</label>
-                  <input
-                    type="date"
-                    value={newHolidayDate}
-                    onChange={(e) => setNewHolidayDate(e.target.value)}
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  />
-                </div>
-                <div className="flex-[2]">
-                  <label className="block text-xs font-bold text-slate-500 mb-1">Nome do Feriado</label>
-                  <input
-                    type="text"
-                    value={newHolidayName}
-                    onChange={(e) => setNewHolidayName(e.target.value)}
-                    placeholder="Ex: Aniversário da Cidade"
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  />
-                </div>
-                <button
-                  onClick={addHoliday}
-                  className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold text-sm transition-colors h-[38px]"
-                >
-                  Adicionar
-                </button>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
-                      <th className="px-4 py-3 font-semibold">Data</th>
-                      <th className="px-4 py-3 font-semibold">Nome</th>
-                      <th className="px-4 py-3 font-semibold text-right">Ações</th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
-                    {holidays.sort((a, b) => a.date.localeCompare(b.date)).map((h) => (
-                      <tr key={h.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 font-mono">{formatDate(new Date(h.date + 'T12:00:00'))}</td>
-                        <td className="px-4 py-3 font-bold">{h.name}</td>
-                        <td className="px-4 py-3 text-right">
-                          <button onClick={() => deleteHoliday(h.id)} className="text-red-500 hover:text-red-700 p-1">
-                            <Trash2 size={18} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {holidays.length === 0 && (
-                      <tr>
-                        <td colSpan="3" className="px-4 py-8 text-center text-slate-400">
-                          Nenhum feriado cadastrado.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : (
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-[600px] relative z-0">
-              <MapContainer center={[-14.2350, -51.9253]} zoom={4} style={{ height: '100%', width: '100%' }}>
-                <TileLayer
-                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                />
-                {allUsers.map(user => (
-                  user.currentLocation && (
-                    <Marker key={user.id} position={[user.currentLocation.lat, user.currentLocation.lng]}>
-                      <Popup>
-                        <div className="text-center">
-                          <strong className="block text-lg">{user.name}</strong>
-                          <span className="text-xs text-slate-500">{user.email}</span>
-                          <br />
-                          <span className="text-xs text-slate-400">
-                            Visto em: {user.lastSeen ? formatTime(user.lastSeen.toDate()) : 'Desconhecido'}
-                          </span>
-                        </div>
-                      </Popup>
-                    </Marker>
-                  )
-                ))}
-              </MapContainer>
-              {allUsers.filter(u => u.currentLocation).length === 0 && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-[1000] pointer-events-none">
-                  <div className="bg-white p-4 rounded-lg shadow-lg text-center">
-                    <p className="font-bold text-slate-700">Nenhum técnico online com GPS ativo.</p>
-                  </div>
-                </div>
-              )}
-            </div>
-          )
+            )
+            }
+          </div>
+        )
         }
+
+        {activeTab === 'holidays' && (
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="font-bold text-lg text-slate-700 flex items-center gap-2"><Calendar size={20} /> Gestão de Feriados</h3>
+              <button
+                onClick={importNationalHolidays}
+                className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 py-2 rounded-lg font-bold text-sm transition-colors"
+              >
+                Importar Feriados Nacionais
+              </button>
+            </div>
+
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex gap-4 items-end">
+              <div className="flex-1">
+                <label className="block text-xs font-bold text-slate-500 mb-1">Data</label>
+                <input
+                  type="date"
+                  value={newHolidayDate}
+                  onChange={(e) => setNewHolidayDate(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+              <div className="flex-[2]">
+                <label className="block text-xs font-bold text-slate-500 mb-1">Nome do Feriado</label>
+                <input
+                  type="text"
+                  value={newHolidayName}
+                  onChange={(e) => setNewHolidayName(e.target.value)}
+                  placeholder="Ex: Aniversário da Cidade"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+              <button
+                onClick={addHoliday}
+                className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold text-sm transition-colors h-[38px]"
+              >
+                Adicionar
+              </button>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
+                    <th className="px-4 py-3 font-semibold">Data</th>
+                    <th className="px-4 py-3 font-semibold">Nome</th>
+                    <th className="px-4 py-3 font-semibold text-right">Ações</th>
+                  </tr>
+                </thead>
+                <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
+                  {holidays.sort((a, b) => a.date.localeCompare(b.date)).map((h) => (
+                    <tr key={h.id} className="hover:bg-slate-50">
+                      <td className="px-4 py-3 font-mono">{formatDate(new Date(h.date + 'T12:00:00'))}</td>
+                      <td className="px-4 py-3 font-bold">{h.name}</td>
+                      <td className="px-4 py-3 text-right">
+                        <button onClick={() => deleteHoliday(h.id)} className="text-red-500 hover:text-red-700 p-1">
+                          <Trash2 size={18} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {holidays.length === 0 && (
+                    <tr>
+                      <td colSpan="3" className="px-4 py-8 text-center text-slate-400">
+                        Nenhum feriado cadastrado.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
+        }
+
+        {activeTab === 'notifications' && (
+          <div className="bg-white rounded-2xl shadow-xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-300">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="p-3 bg-indigo-100 rounded-xl">
+                <Mail className="text-indigo-600" size={24} />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-slate-800">Enviar Notificações</h2>
+                <p className="text-sm text-slate-500">Envie mensagens para os técnicos via aplicativo.</p>
+              </div>
+              <button
+                onClick={handleForceCheck}
+                disabled={isSendingNotification}
+                className="px-4 py-2 bg-orange-100 text-orange-700 rounded-lg hover:bg-orange-200 transition-colors font-medium flex items-center gap-2"
+              >
+                {isSendingNotification ? <Loader2 className="animate-spin" size={18} /> : <BellRing size={18} />}
+                Forçar Verificação Automática
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              {/* Configurações de Janela de Tempo */}
+              <div className="col-span-1 lg:col-span-2 bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
+                <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+                  <Settings size={18} /> Configuração de Janelas de Verificação
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Janela de Atraso (minutos após início)</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="number"
+                        value={delayWindow}
+                        onChange={(e) => setDelayWindow(Number(e.target.value))}
+                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                        placeholder="Ex: 60"
+                      />
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">Tempo após o início do expediente para verificar atrasos.</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Janela de Hora Extra (minutos após fim)</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="number"
+                        value={overtimeWindow}
+                        onChange={(e) => setOvertimeWindow(Number(e.target.value))}
+                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                        placeholder="Ex: 120"
+                      />
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">Tempo após o fim do expediente para verificar horas extras.</p>
+                  </div>
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <button
+                    onClick={saveNotificationSettings}
+                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium"
+                  >
+                    Salvar Configurações
+                  </button>
+                </div>
+              </div>
+
+              {/* Seleção de Usuários */}
+              <div className="space-y-4">
+                <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                  <Users size={18} /> Destinatários
+                </h3>
+                <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 max-h-[400px] overflow-y-auto">
+                  <div className="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                    <input
+                      type="checkbox"
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedUsersForNotification(allUsers.filter(u => u.role === 'tech').map(u => u.id));
+                        } else {
+                          setSelectedUsersForNotification([]);
+                        }
+                      }}
+                      checked={selectedUsersForNotification.length === allUsers.filter(u => u.role === 'tech').length && allUsers.filter(u => u.role === 'tech').length > 0}
+                      className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
+                    />
+                    <span className="font-semibold text-slate-700">Selecionar Todos</span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {allUsers.filter(u => u.role === 'tech').map(user => (
+                      <label key={user.id} className="flex items-center gap-3 p-3 bg-white rounded-lg border border-slate-100 hover:border-indigo-200 cursor-pointer transition-colors">
+                        <input
+                          type="checkbox"
+                          checked={selectedUsersForNotification.includes(user.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedUsersForNotification([...selectedUsersForNotification, user.id]);
+                            } else {
+                              setSelectedUsersForNotification(selectedUsersForNotification.filter(id => id !== user.id));
+                            }
+                          }}
+                          className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
+                        />
+                        <div className="flex-1">
+                          <div className="font-medium text-slate-800">{user.name}</div>
+                          <div className="text-xs text-slate-500">{user.email}</div>
+                        </div>
+                        {user.fcmTokens && user.fcmTokens.length > 0 ? (
+                          <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full flex items-center gap-1">
+                            <Smartphone size={12} /> App Ativo
+                          </span>
+                        ) : (
+                          <span className="text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded-full">
+                            Sem App
+                          </span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="text-sm text-slate-500 text-right">
+                  {selectedUsersForNotification.length} usuários selecionados
+                </div>
+              </div>
+
+              {/* Composição da Mensagem */}
+              <div className="space-y-4">
+                <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                  <FileText size={18} /> Mensagem
+                </h3>
+                <div className="space-y-4 bg-slate-50 p-6 rounded-xl border border-slate-200">
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Título</label>
+                    <input
+                      type="text"
+                      value={notificationTitle}
+                      onChange={(e) => setNotificationTitle(e.target.value)}
+                      placeholder="Ex: Aviso Importante"
+                      className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Conteúdo</label>
+                    <textarea
+                      value={notificationBody}
+                      onChange={(e) => setNotificationBody(e.target.value)}
+                      placeholder="Digite sua mensagem aqui..."
+                      rows={6}
+                      className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
+                    />
+                  </div>
+                  <button
+                    onClick={handleSendNotification}
+                    disabled={selectedUsersForNotification.length === 0 || !notificationTitle || !notificationBody || isSendingNotification}
+                    className={`w-full py-3 rounded-xl font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 ${selectedUsersForNotification.length === 0 || !notificationTitle || !notificationBody || isSendingNotification ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 active:scale-95'}`}
+                  >
+                    {isSendingNotification ? (
+                      <>Enviando...</>
+                    ) : (
+                      <><ArrowRight size={20} /> Enviar Notificação</>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {activeTab === 'admins' && (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -2404,6 +2959,13 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                             title="Trocar Senha"
                           >
                             <Lock size={18} />
+                          </button>
+                          <button
+                            onClick={() => openLocationPicker(user)}
+                            className={`p-2 rounded-lg transition-colors ${user.allowedLocation ? 'text-green-600 hover:bg-green-50' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}
+                            title={user.allowedLocation ? "Local Configurado (Clique para alterar)" : "Configurar Local de Trabalho"}
+                          >
+                            <MapPin size={18} />
                           </button>
                           <button
                             onClick={() => toggleAdminRole(user)}
@@ -2576,7 +3138,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                           value={punch.time}
                           onChange={(e) => handlePunchChange(idx, 'time', e.target.value)}
                           className="border border-slate-300 rounded px-2 py-1 text-sm font-mono"
-                          disabled={punch.type === 'atestado'}
+                          disabled={punch.type === 'atestado' || punch.type === 'folga'}
                         />
                         <select
                           value={punch.type}
@@ -2589,6 +3151,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                           <option value="saida">Saída</option>
                           <option value="lunch_offline">Almoço Offline</option>
                           <option value="atestado">Atestado Médico</option>
+                          <option value="folga">Folga</option>
                         </select>
                         <button
                           onClick={() => handleRemovePunchRow(idx)}
@@ -2618,6 +3181,16 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                       className="flex-1 py-2 border-2 border-dashed border-blue-300 text-blue-500 rounded-lg hover:border-blue-500 hover:text-blue-600 font-bold text-sm transition-colors flex items-center justify-center gap-2"
                     >
                       <FileText size={16} /> Registrar Atestado
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (window.confirm("Isso removerá todos os registros do dia e marcará como Folga. Continuar?")) {
+                          setEditingPunches([{ id: `temp_${Date.now()}`, type: 'folga', time: '00:00', isNew: true }]);
+                        }
+                      }}
+                      className="flex-1 py-2 border-2 border-dashed border-teal-300 text-teal-500 rounded-lg hover:border-teal-500 hover:text-teal-600 font-bold text-sm transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Coffee size={16} /> Registrar Folga
                     </button>
                   </div>
 
@@ -2728,6 +3301,186 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
             </div>
           </div>
         )}
+
+        {/* Modal de Alteração de Credenciais (Senha e Email) */}
+        {showPasswordModal && selectedUserForPassword && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+              <div className="bg-slate-800 p-6 text-white flex justify-between items-center">
+                <h3 className="text-xl font-bold flex items-center gap-2">
+                  <Lock size={24} /> Gerenciar Credenciais
+                </h3>
+                <button onClick={() => setShowPasswordModal(false)} className="text-white/80 hover:text-white">
+                  <X size={24} />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <p className="text-sm text-slate-600">
+                  Alterando dados de acesso para <strong>{selectedUserForPassword.name}</strong>.
+                </p>
+
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">E-mail de Acesso</label>
+                  <div className="relative">
+                    <Mail size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="email"
+                      value={newEmail}
+                      onChange={(e) => setNewEmail(e.target.value)}
+                      className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      placeholder="novo.email@empresa.com"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">Nova Senha</label>
+                  <div className="relative">
+                    <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      placeholder="Deixe vazio para manter a atual"
+                    />
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">Mínimo de 6 caracteres recomendado.</p>
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={() => setShowPasswordModal(false)}
+                    className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleUpdateUserCredentials}
+                    className="flex-1 bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl shadow-lg transition-all active:scale-95"
+                  >
+                    Salvar Alterações
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL DE ROTA DIÁRIA */}
+        {showRouteModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[2000] p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <div>
+                  <h3 className="text-xl font-bold text-slate-800">Rota Diária: {selectedRouteUser}</h3>
+                  <p className="text-sm text-slate-500">Visualizando {selectedRoutePunches.length} registros de localização</p>
+                </div>
+                <button
+                  onClick={() => setShowRouteModal(false)}
+                  className="text-slate-400 hover:text-slate-600 p-2 rounded-full hover:bg-slate-200 transition-colors"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="relative bg-slate-100 h-[600px] w-full">
+                <MapContainer
+                  key={selectedRouteUser} // Força re-render ao mudar de usuário
+                  bounds={selectedRoutePunches.map(p => [p.location.lat, p.location.lng])}
+                  zoom={13}
+                  style={{ height: '100%', width: '100%' }}
+                >
+                  <TileLayer
+                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  />
+                  {selectedRoutePunches.map((punch, idx) => (
+                    <Marker key={punch.id || idx} position={[punch.location.lat, punch.location.lng]}>
+                      <Popup>
+                        <div className="text-center min-w-[150px]">
+                          <strong className="block text-lg capitalize mb-1">
+                            {punch.type === 'entrada' ? 'Entrada' :
+                              punch.type === 'saida_almoco' ? 'Saída Almoço' :
+                                punch.type === 'volta_almoco' ? 'Volta Almoço' :
+                                  punch.type === 'saida' ? 'Saída' : punch.type}
+                          </strong>
+                          <span className="text-sm font-mono bg-slate-100 px-2 py-1 rounded block mb-2">
+                            {formatTime(punch.timestamp.toDate())}
+                          </span>
+                          {punch.justification && (
+                            <p className="text-xs text-slate-500 italic border-t border-slate-200 pt-2 mt-2">
+                              "{punch.justification}"
+                            </p>
+                          )}
+                          <div className="text-[10px] text-slate-400 mt-2">
+                            Precisão: {Math.round(punch.location.accuracy || 0)}m
+                          </div>
+                        </div>
+                      </Popup>
+                    </Marker>
+                  ))}
+                </MapContainer>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL DE SELEÇÃO DE LOCAL (GEOFENCING) */}
+        {showLocationPicker && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[2000] p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <div>
+                  <h3 className="text-xl font-bold text-slate-800">Definir Local de Trabalho: {selectedUserForLocation?.name}</h3>
+                  <p className="text-sm text-slate-500">Clique no mapa para definir o centro da área permitida.</p>
+                </div>
+                <button
+                  onClick={() => setShowLocationPicker(false)}
+                  className="text-slate-400 hover:text-slate-600 p-2 rounded-full hover:bg-slate-200 transition-colors"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="p-4 bg-white border-b border-slate-100 flex items-center gap-4">
+                <div className="flex-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Raio Permitido (metros)</label>
+                  <input
+                    type="number"
+                    value={tempLocation?.radius || 200}
+                    onChange={(e) => setTempLocation({ ...tempLocation, radius: Number(e.target.value) })}
+                    className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+                <button
+                  onClick={handleSaveLocation}
+                  className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg shadow transition-colors flex items-center gap-2"
+                >
+                  <Save size={18} /> Salvar Local
+                </button>
+              </div>
+
+              <div className="relative bg-slate-100 h-[500px] w-full">
+                <MapContainer
+                  center={[tempLocation?.lat || -14.2350, tempLocation?.lng || -51.9253]}
+                  zoom={15}
+                  style={{ height: '100%', width: '100%' }}
+                >
+                  <TileLayer
+                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  />
+                  <LocationMarker
+                    position={tempLocation}
+                    setPosition={setTempLocation}
+                    radius={tempLocation?.radius}
+                  />
+                </MapContainer>
+              </div>
+            </div>
+          </div>
+        )}
       </main >
     </div >
   );
@@ -2773,6 +3526,108 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  const [notificationsBlocked, setNotificationsBlocked] = useState(false);
+
+  // --- NOTIFICAÇÕES (FCM) ---
+  useEffect(() => {
+    const setupNotifications = async () => {
+      if (!user || !currentUserData) return;
+
+      try {
+        if (Capacitor.isNativePlatform()) {
+          // --- LÓGICA NATIVA (ANDROID/IOS) ---
+          const permStatus = await PushNotifications.checkPermissions();
+
+          let permission = permStatus.receive;
+          if (permission === 'prompt') {
+            permission = (await PushNotifications.requestPermissions()).receive;
+          }
+
+          if (permission !== 'granted') {
+            // Se for técnico, bloqueia
+            if (currentUserData.role !== 'admin') {
+              setNotificationsBlocked(true);
+            }
+          } else {
+            setNotificationsBlocked(false);
+            await PushNotifications.register();
+
+            // Listener para obter o token
+            await PushNotifications.addListener('registration', async (token) => {
+              console.log('Push Registration Token:', token.value);
+              const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', currentUserData.id);
+              await updateDoc(userRef, {
+                fcmTokens: arrayUnion(token.value)
+              });
+            });
+
+            await PushNotifications.addListener('registrationError', (err) => {
+              console.error('Push Registration Error:', err);
+            });
+
+            // Listener para notificações recebidas (Foreground)
+            await PushNotifications.addListener('pushNotificationReceived', (notification) => {
+              console.log('Push Received:', notification);
+              // Verifica se é ação de hora extra
+              if (notification.data && notification.data.action === 'overtime_confirm') {
+                // O listener no TechnicianView vai pegar isso?
+                // Não, precisamos disparar um evento ou usar um estado global.
+                // Mas como o TechnicianView também tem acesso ao messaging, vamos tentar manter simples.
+                // Para native, o 'messaging' do firebase-js-sdk pode não disparar.
+                // Vamos usar um CustomEvent para comunicar com o TechnicianView
+                window.dispatchEvent(new CustomEvent('native-push-received', { detail: notification }));
+              } else {
+                alert(`🔔 ${notification.title}\n${notification.body}`);
+              }
+            });
+
+            // Listener para clique na notificação
+            await PushNotifications.addListener('pushNotificationActionPerformed', (notification) => {
+              console.log('Push Action Performed:', notification);
+              if (notification.notification.data && notification.notification.data.action === 'overtime_confirm') {
+                window.dispatchEvent(new CustomEvent('native-push-received', { detail: notification.notification }));
+              }
+            });
+          }
+        } else {
+          // --- LÓGICA WEB (PWA) ---
+          if (messaging) {
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') {
+              if (currentUserData.role !== 'admin') {
+                setNotificationsBlocked(true);
+              }
+            } else {
+              setNotificationsBlocked(false);
+              const token = await getToken(messaging).catch(e => console.log("Erro ao obter token Web:", e));
+              if (token) {
+                const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', currentUserData.id);
+                await updateDoc(userRef, {
+                  fcmTokens: arrayUnion(token)
+                });
+              }
+            }
+            // Listener Web
+            onMessage(messaging, (payload) => {
+              console.log('Mensagem recebida (Web):', payload);
+              // Dispara evento compatível
+              const notificationData = {
+                title: payload.notification.title,
+                body: payload.notification.body,
+                data: payload.data
+              };
+              window.dispatchEvent(new CustomEvent('native-push-received', { detail: notificationData }));
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Erro ao configurar notificações:', err);
+      }
+    };
+
+    setupNotifications();
+  }, [user, currentUserData]);
+
   const handleLogin = (data) => {
     setCurrentUserData(data);
     localStorage.setItem('ponto_app_user_id', data.id);
@@ -2786,6 +3641,47 @@ export default function App() {
   if (!authInitialized) return <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white"><div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full"></div></div>;
 
   if (!currentUserData) return <LoginScreen onLogin={handleLogin} />;
+
+  // TELA DE BLOQUEIO DE NOTIFICAÇÕES
+  if (notificationsBlocked && currentUserData.role !== 'admin') {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 text-white p-6 text-center">
+        <div className="bg-red-500/20 p-6 rounded-full mb-6">
+          <BellOff size={64} className="text-red-500" />
+        </div>
+        <h1 className="text-2xl font-bold mb-4">Notificações Necessárias</h1>
+        <p className="text-slate-300 mb-8 max-w-md">
+          Para garantir que você receba avisos importantes sobre seu ponto e horas extras, é obrigatório permitir as notificações.
+        </p>
+        <button
+          onClick={async () => {
+            // Tenta solicitar novamente ou abrir configs
+            if (Capacitor.isNativePlatform()) {
+              // Tenta solicitar
+              try {
+                const perm = await PushNotifications.requestPermissions();
+                if (perm.receive === 'granted') {
+                  window.location.reload();
+                } else {
+                  alert("Você precisa ir nas Configurações do seu celular > Aplicativos > Ponto Digital > Notificações e ativar.");
+                }
+              } catch (e) {
+                alert("Abra as configurações do app e ative as notificações.");
+              }
+            } else {
+              Notification.requestPermission().then(p => {
+                if (p === 'granted') window.location.reload();
+                else alert("Ative as notificações no cadeado ao lado da URL.");
+              });
+            }
+          }}
+          className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-8 rounded-xl transition-all active:scale-95"
+        >
+          Ativar Notificações
+        </button>
+      </div>
+    );
+  }
 
   if (currentUserData.role === 'admin') return <ManagerDashboard user={user} currentUserData={currentUserData} onLogout={handleLogout} />;
   return <TechnicianView user={user} currentUserData={currentUserData} onLogout={handleLogout} />;

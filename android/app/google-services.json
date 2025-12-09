@@ -1,0 +1,29 @@
+{
+    "project_info": {
+        "project_number": "500861704454",
+        "project_id": "cartao-de-ponto-5e801",
+        "storage_bucket": "cartao-de-ponto-5e801.firebasestorage.app"
+    },
+    "client": [
+        {
+            "client_info": {
+                "mobilesdk_app_id": "1:500861704454:android:16fc18049ce9943415e687",
+                "android_client_info": {
+                    "package_name": "com.pontodigital.app"
+                }
+            },
+            "oauth_client": [],
+            "api_key": [
+                {
+                    "current_key": "AIzaSyDtU2DH7AoOQeZ-N7tP9VNqR8ocY0x0N0o"
+                }
+            ],
+            "services": {
+                "appinvite_service": {
+                    "other_platform_oauth_client": []
+                }
+            }
+        }
+    ],
+    "configuration_version": "1"
+}
