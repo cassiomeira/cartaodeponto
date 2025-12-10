@@ -54,7 +54,8 @@ import {
   Save,
   Trash2,
   BellRing,
-  Loader2
+  Loader2,
+  Search
 } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -2340,7 +2341,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                     </thead>
                     <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
                       {dailyStats
-                        .filter(stat => stat.name.toLowerCase().includes(searchTerm.toLowerCase()))
+                        .filter(stat => (stat.name || '').toLowerCase().includes(searchTerm.toLowerCase()))
                         .map((stat, idx) => {
                           const hoursWorked = stat.totalWorkedMs / 3600000;
                           const isOvertime = hoursWorked > 8;
@@ -2559,7 +2560,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                       <option value="">Selecione um técnico...</option>
                       {allUsers
                         .filter(u => u.role !== 'admin')
-                        .filter(u => u.name.toLowerCase().includes(reportSearchTerm.toLowerCase()))
+                        .filter(u => (u.name || '').toLowerCase().includes(reportSearchTerm.toLowerCase()))
                         .map(u => (
                           <option key={u.id} value={u.id}>{u.name}</option>
                         ))}
