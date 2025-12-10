@@ -1338,11 +1338,11 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
   const [delayWindow, setDelayWindow] = useState(60); // Default 60 min
   const [overtimeWindow, setOvertimeWindow] = useState(120); // Default 120 min
 
-  useEffect(() => {
-    // Estados de Filtro de Busca
-    const [searchTerm, setSearchTerm] = useState('');
-    const [reportSearchTerm, setReportSearchTerm] = useState('');
+  // Estados de Filtro de Busca
+  const [searchTerm, setSearchTerm] = useState('');
+  const [reportSearchTerm, setReportSearchTerm] = useState('');
 
+  useEffect(() => {
     const loadSettings = async () => {
       try {
         const settingsDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'notifications'));
