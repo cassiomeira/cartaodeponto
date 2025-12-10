@@ -113,6 +113,27 @@ async function runScheduleCheck() {
         const startTotalMinutes = startH * 60 + startM;
         const endTotalMinutes = endH * 60 + endM;
 
+        // --- 0. VERIFICAÇÃO DE STATUS ESPECIAIS (Atestado, Férias, Folga) ---
+        // Se o técnico está dispensado hoje, não deve receber notificações de atraso nem de hora extra.
+        const specialSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
+            .where('userEmail', '==', user.email)
+            .where('type', 'in', ['atestado', 'ferias', 'folga'])
+            .get();
+
+        let hasSpecialStatus = false;
+        specialSnapshot.forEach(doc => {
+            const pData = doc.data();
+            const pDate = pData.timestamp.toDate();
+            if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth()) {
+                hasSpecialStatus = true;
+            }
+        });
+
+        if (hasSpecialStatus) {
+            console.log(`Usuário ${user.name} possui status especial hoje (Atestado/Férias/Folga). Pulando verificações.`);
+            continue;
+        }
+
         // --- VERIFICAÇÃO DE ATRASO (Entrada) ---
         if (currentTotalMinutes > (startTotalMinutes + 10) && currentTotalMinutes < (startTotalMinutes + delayWindow)) {
             const punchesSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
@@ -159,6 +180,28 @@ async function runScheduleCheck() {
 
         // --- VERIFICAÇÃO DE SAÍDA (Hora Extra) ---
         if (currentTotalMinutes >= endTotalMinutes && currentTotalMinutes < (endTotalMinutes + overtimeWindow)) {
+
+            // 0. Verifica se o usuário de fato entrou hoje
+            // (Só cobra hora extra se iniciou a jornada)
+            const entrySnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
+                .where('userEmail', '==', user.email)
+                .where('type', '==', 'entrada')
+                .get();
+
+            let hasEntry = false;
+            entrySnapshot.forEach(doc => {
+                const pData = doc.data();
+                const pDate = pData.timestamp.toDate();
+                if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth()) {
+                    hasEntry = true;
+                }
+            });
+
+            if (!hasEntry) {
+                // Se não entrou, não cobra saída/hora extra (provavelmente faltou ou esqueceu entrada - nesse caso o alerta de atraso já foi).
+                continue;
+            }
+
             // 1. Verifica se já saiu
             const exitSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
                 .where('userEmail', '==', user.email)

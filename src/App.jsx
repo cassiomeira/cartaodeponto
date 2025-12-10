@@ -1339,6 +1339,10 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
   const [overtimeWindow, setOvertimeWindow] = useState(120); // Default 120 min
 
   useEffect(() => {
+    // Estados de Filtro de Busca
+    const [searchTerm, setSearchTerm] = useState('');
+    const [reportSearchTerm, setReportSearchTerm] = useState('');
+
     const loadSettings = async () => {
       try {
         const settingsDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'notifications'));
@@ -2206,22 +2210,22 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col">
-      <nav className="bg-white border-b border-slate-200 px-8 py-4 flex justify-between items-center shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="bg-indigo-600 text-white p-2 rounded-lg"><LayoutDashboard size={24} /></div>
-          <div><h1 className="font-bold text-xl text-slate-800">Painel de Gestão ISP</h1><p className="text-xs text-slate-500">Controle de Frota e Ponto</p></div>
+      <nav className="bg-white border-b border-slate-200 px-4 md:px-8 py-4 flex flex-col md:flex-row justify-between items-center shadow-sm gap-4">
+        <div className="flex items-center gap-3 w-full md:w-auto">
+          <img src="/logo.jpg" alt="Netcar Logo" className="h-10 w-10 rounded-lg object-cover" />
+          <div><h1 className="font-bold text-lg md:text-xl text-slate-800">Netcar Telecom - Gestão</h1><p className="text-xs text-slate-500">Controle de Frota e Ponto</p></div>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center justify-between w-full md:w-auto gap-4">
           <div className="text-right"><p className="text-sm font-bold text-slate-700">{currentUserData.name}</p><p className="text-xs text-slate-500">{currentUserData.email}</p></div>
           <button onClick={onLogout} className="text-slate-400 hover:text-red-500 transition-colors"><LogOut size={20} /></button>
         </div>
       </nav>
 
-      <main className="flex-1 p-8 overflow-y-auto">
+      <main className="flex-1 p-4 md:p-8 overflow-y-auto">
         <div className="mb-8 flex flex-col md:flex-row justify-between items-end gap-4">
           <div>
             <label className="block text-sm font-bold text-slate-700 mb-1">Data de Análise</label>
-            <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="bg-white border border-slate-300 rounded-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
+            <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="bg-white border border-slate-300 rounded-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none" />
           </div>
 
           <div className="flex gap-4">
@@ -2235,44 +2239,44 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         </div>
 
         {/* ABAS DE NAVEGAÇÃO */}
-        <div className="flex gap-4 mb-6 border-b border-slate-200">
+        <div className="flex gap-4 mb-6 border-b border-slate-200 overflow-x-auto pb-2 scrollbar-hide">
           <button
             onClick={() => setActiveTab('dashboard')}
-            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'dashboard' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'dashboard' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            <div className="flex items-center gap-2"><LayoutDashboard size={18} /> Visão Geral</div>
+            <div className="flex items-center gap-2 whitespace-nowrap"><LayoutDashboard size={18} /> Visão Geral</div>
           </button>
           <button
             onClick={() => setActiveTab('map')}
-            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'map' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'map' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            <div className="flex items-center gap-2"><Globe size={18} /> Mapa em Tempo Real</div>
+            <div className="flex items-center gap-2 whitespace-nowrap"><Globe size={18} /> Mapa em Tempo Real</div>
           </button>
           <button
             onClick={() => setActiveTab('admins')}
-            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'admins' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'admins' ? 'bg-blue-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-blue-50'}`}
           >
             <Users size={20} />
             <span className="font-semibold">Administradores</span>
           </button>
           <button
             onClick={() => setActiveTab('notifications')}
-            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'notifications' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'notifications' ? 'bg-blue-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-blue-50'}`}
           >
             <Mail size={20} />
             <span className="font-semibold">Notificações</span>
           </button>
           <button
             onClick={() => setActiveTab('reports')}
-            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'reports' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${activeTab === 'reports' ? 'bg-blue-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-blue-50'}`}
           >
-            <div className="flex items-center gap-2"><FileText size={18} /> Relatórios</div>
+            <div className="flex items-center gap-2 whitespace-nowrap"><FileText size={18} /> Relatórios</div>
           </button>
           <button
             onClick={() => setActiveTab('holidays')}
-            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'holidays' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            className={`pb-3 px-4 font-bold text-sm transition-colors border-b-2 ${activeTab === 'holidays' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            <div className="flex items-center gap-2"><Calendar size={18} /> Feriados</div>
+            <div className="flex items-center gap-2 whitespace-nowrap"><Calendar size={18} /> Feriados</div>
           </button>
         </div>
 
@@ -2297,21 +2301,33 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
 
               <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
-                  <h3 className="font-bold text-slate-700 flex items-center gap-2"><UserCircle size={20} className="text-indigo-600" /> Equipe Técnica ({dailyStats.length})</h3>
-                  <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600">Atualizado em Tempo Real</span>
+                  <h3 className="font-bold text-slate-700 flex items-center gap-2"><UserCircle size={20} className="text-blue-600" /> Equipe Técnica ({dailyStats.length})</h3>
+                  <div className="flex items-center gap-2">
+                    <div className="relative">
+                      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        placeholder="Buscar técnico..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="pl-9 pr-4 py-1.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600 hidden md:inline-block">Atualizado em Tempo Real</span>
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
-                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => { setSortBy('name'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-blue-600 transition-colors" onClick={() => { setSortBy('name'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                           Técnico {sortBy === 'name' && (sortOrder === 'asc' ? '↑' : '↓')}
                         </th>
-                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => { setSortBy('city'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-blue-600 transition-colors" onClick={() => { setSortBy('city'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                           Cidade {sortBy === 'city' && (sortOrder === 'asc' ? '↑' : '↓')}
                         </th>
-                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => { setSortBy('status'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                        <th className="px-6 py-4 font-semibold cursor-pointer hover:text-blue-600 transition-colors" onClick={() => { setSortBy('status'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
                           Status {sortBy === 'status' && (sortOrder === 'asc' ? '↑' : '↓')}
                         </th>
                         <th className="px-6 py-4 font-semibold text-center">Horas Trab.</th>
@@ -2323,149 +2339,151 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                       </tr>
                     </thead>
                     <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
-                      {dailyStats.map((stat, idx) => {
-                        const hoursWorked = stat.totalWorkedMs / 3600000;
-                        const isOvertime = hoursWorked > 8;
-                        const lunchHours = stat.lunchDurationMs / 3600000;
-                        const lunchAlert = stat.lunchDurationMs > 0 && (lunchHours < 1 || lunchHours > 2);
+                      {dailyStats
+                        .filter(stat => stat.name.toLowerCase().includes(searchTerm.toLowerCase()))
+                        .map((stat, idx) => {
+                          const hoursWorked = stat.totalWorkedMs / 3600000;
+                          const isOvertime = hoursWorked > 8;
+                          const lunchHours = stat.lunchDurationMs / 3600000;
+                          const lunchAlert = stat.lunchDurationMs > 0 && (lunchHours < 1 || lunchHours > 2);
 
-                        // Encontra o objeto user original para pegar o ID e trackingEnabled
-                        const userObj = allUsers.find(u => u.email === stat.email);
-                        const isTracking = userObj ? (userObj.trackingEnabled !== false) : true;
+                          // Encontra o objeto user original para pegar o ID e trackingEnabled
+                          const userObj = allUsers.find(u => u.email === stat.email);
+                          const isTracking = userObj ? (userObj.trackingEnabled !== false) : true;
 
-                        return (
-                          <tr key={idx} className="hover:bg-slate-50 transition-colors">
-                            <td className="px-6 py-4">
-                              <button onClick={() => userObj && openTechModal(userObj)} className="text-left hover:bg-slate-100 p-1 -m-1 rounded transition-colors group">
-                                <div className="font-bold text-slate-800 group-hover:text-indigo-600 flex items-center gap-2">
-                                  {stat.name}
-                                  <Settings size={14} className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-400" />
+                          return (
+                            <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                              <td className="px-6 py-4">
+                                <button onClick={() => userObj && openTechModal(userObj)} className="text-left hover:bg-slate-100 p-1 -m-1 rounded transition-colors group">
+                                  <div className="font-bold text-slate-800 group-hover:text-blue-600 flex items-center gap-2">
+                                    {stat.name}
+                                    <Settings size={14} className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-400" />
+                                  </div>
+                                  <div className="text-xs text-slate-400">{stat.email || 'Sem e-mail'}</div>
+                                </button>
+                              </td>
+                              <td className="px-6 py-4">
+                                <div className="flex items-center gap-2 group">
+                                  <span className="text-sm text-slate-600 font-medium">{stat.city}</span>
+                                  {userObj && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        openCityModal(userObj);
+                                      }}
+                                      className="text-slate-400 hover:text-blue-600 transition-colors"
+                                      title="Editar Cidade"
+                                    >
+                                      <Settings size={14} />
+                                    </button>
+                                  )}
                                 </div>
-                                <div className="text-xs text-slate-400">{stat.email || 'Sem e-mail'}</div>
-                              </button>
-                            </td>
-                            <td className="px-6 py-4">
-                              <div className="flex items-center gap-2 group">
-                                <span className="text-sm text-slate-600 font-medium">{stat.city}</span>
-                                {userObj && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openCityModal(userObj);
-                                    }}
-                                    className="text-slate-400 hover:text-indigo-600 transition-colors"
-                                    title="Editar Cidade"
-                                  >
-                                    <Settings size={14} />
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${stat.punches.some(p => p.type === 'atestado') ? 'bg-blue-100 text-blue-800' :
-                                stat.punches.some(p => p.type === 'ferias') ? 'bg-purple-100 text-purple-800' :
-                                  stat.punches.some(p => p.type === 'folga') ? 'bg-teal-100 text-teal-800' :
-                                    stat.status === 'Trabalhando' ? 'bg-green-100 text-green-800' :
-                                      stat.status === 'Em Almoço' ? 'bg-yellow-100 text-yellow-800' :
-                                        stat.status === 'Finalizado' ? 'bg-slate-100 text-slate-800' :
-                                          stat.status === 'Offline' ? 'bg-gray-100 text-gray-500' : 'bg-red-100 text-red-800'
-                                }`}>
-                                {stat.punches.some(p => p.type === 'atestado') ? 'Atestado' :
-                                  stat.punches.some(p => p.type === 'ferias') ? 'Férias' :
-                                    stat.punches.some(p => p.type === 'folga') ? 'Folga' : stat.status}
-                              </span>
-                            </td>
-                            <td className="px-6 py-4 text-center font-mono">
-                              {formatDuration(stat.totalWorkedMs)}
-                              <div className="w-20 h-1.5 bg-slate-200 rounded-full mt-1 mx-auto overflow-hidden">
-                                <div className={`h-full rounded-full ${isOvertime ? 'bg-red-500' : 'bg-indigo-500'}`} style={{ width: `${Math.min((hoursWorked / 8) * 100, 100)}%` }}></div>
-                              </div>
-                            </td>
-                            <td className="px-6 py-4 text-center font-mono">
-                              <div className={`flex flex-col items-center justify-center gap-1 ${lunchAlert ? 'text-red-600 font-bold' : ''}`}>
-                                {stat.offlineLunch ? (
-                                  <>
-                                    <span className="font-bold text-slate-600">1h (Fixo)</span>
-                                    {stat.offlineLunch.justification && (
-                                      <span className="text-[10px] text-slate-500 max-w-[100px] truncate" title={stat.offlineLunch.justification}>
-                                        {stat.offlineLunch.justification}
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${stat.punches.some(p => p.type === 'atestado') ? 'bg-blue-100 text-blue-800' :
+                                  stat.punches.some(p => p.type === 'ferias') ? 'bg-purple-100 text-purple-800' :
+                                    stat.punches.some(p => p.type === 'folga') ? 'bg-teal-100 text-teal-800' :
+                                      stat.status === 'Trabalhando' ? 'bg-green-100 text-green-800' :
+                                        stat.status === 'Em Almoço' ? 'bg-yellow-100 text-yellow-800' :
+                                          stat.status === 'Finalizado' ? 'bg-slate-100 text-slate-800' :
+                                            stat.status === 'Offline' ? 'bg-gray-100 text-gray-500' : 'bg-red-100 text-red-800'
+                                  }`}>
+                                  {stat.punches.some(p => p.type === 'atestado') ? 'Atestado' :
+                                    stat.punches.some(p => p.type === 'ferias') ? 'Férias' :
+                                      stat.punches.some(p => p.type === 'folga') ? 'Folga' : stat.status}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 text-center font-mono">
+                                {formatDuration(stat.totalWorkedMs)}
+                                <div className="w-20 h-1.5 bg-slate-200 rounded-full mt-1 mx-auto overflow-hidden">
+                                  <div className={`h-full rounded-full ${isOvertime ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${Math.min((hoursWorked / 8) * 100, 100)}%` }}></div>
+                                </div>
+                              </td>
+                              <td className="px-6 py-4 text-center font-mono">
+                                <div className={`flex flex-col items-center justify-center gap-1 ${lunchAlert ? 'text-red-600 font-bold' : ''}`}>
+                                  {stat.offlineLunch ? (
+                                    <>
+                                      <span className="font-bold text-slate-600">1h (Fixo)</span>
+                                      {stat.offlineLunch.justification && (
+                                        <span className="text-[10px] text-slate-500 max-w-[100px] truncate" title={stat.offlineLunch.justification}>
+                                          {stat.offlineLunch.justification}
+                                        </span>
+                                      )}
+                                    </>
+                                  ) : (
+                                    <>
+                                      {stat.lunchDurationMs > 0 ? formatDuration(stat.lunchDurationMs) : '--'}
+                                      {lunchAlert && <AlertTriangle size={14} />}
+                                    </>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-6 py-4 text-center">
+                                {isOvertime ? <span className="text-red-600 font-bold text-xs bg-red-50 px-2 py-1 rounded border border-red-100">Sim ({formatDuration(stat.totalWorkedMs - 28800000)})</span> : <span className="text-slate-400">-</span>}
+                              </td>
+                              <td className="px-6 py-4 text-right">
+                                {stat.punches.some(p => p.location) ? (
+                                  <div className="flex items-center justify-end gap-2">
+                                    {stat.punches.some(p => p.isOutOfRange) && (
+                                      <span title="Atenção: Registros fora do local permitido!" className="text-yellow-500 cursor-help">
+                                        <AlertTriangle size={16} />
                                       </span>
                                     )}
-                                  </>
-                                ) : (
-                                  <>
-                                    {stat.lunchDurationMs > 0 ? formatDuration(stat.lunchDurationMs) : '--'}
-                                    {lunchAlert && <AlertTriangle size={14} />}
-                                  </>
+                                    <button
+                                      onClick={() => openRouteModal(stat.punches, stat.name)}
+                                      className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline text-xs font-semibold"
+                                    >
+                                      <MapPin size={14} /> Ver Mapa
+                                    </button>
+                                  </div>
+                                ) : <span className="text-slate-400 text-xs">Sem GPS</span>}
+                              </td>
+                              <td className="px-6 py-4 text-center">
+                                {userObj && (
+                                  <button
+                                    onClick={() => toggleTracking(userObj)}
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isTracking ? 'bg-green-500' : 'bg-slate-300'}`}
+                                  >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isTracking ? 'translate-x-6' : 'translate-x-1'}`} />
+                                  </button>
                                 )}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4 text-center">
-                              {isOvertime ? <span className="text-red-600 font-bold text-xs bg-red-50 px-2 py-1 rounded border border-red-100">Sim ({formatDuration(stat.totalWorkedMs - 28800000)})</span> : <span className="text-slate-400">-</span>}
-                            </td>
-                            <td className="px-6 py-4 text-right">
-                              {stat.punches.some(p => p.location) ? (
-                                <div className="flex items-center justify-end gap-2">
-                                  {stat.punches.some(p => p.isOutOfRange) && (
-                                    <span title="Atenção: Registros fora do local permitido!" className="text-yellow-500 cursor-help">
-                                      <AlertTriangle size={16} />
-                                    </span>
+                              </td>
+                              <td className="px-6 py-4 text-center">
+                                <div className="flex items-center justify-center gap-2">
+                                  {(stat.status === 'Trabalhando' || stat.status === 'Em Almoço') && (
+                                    <button
+                                      onClick={() => handleManualClose(stat)}
+                                      className="text-xs bg-red-100 text-red-700 hover:bg-red-200 px-3 py-1 rounded-full font-bold transition-colors"
+                                    >
+                                      Encerrar Dia
+                                    </button>
                                   )}
                                   <button
-                                    onClick={() => openRouteModal(stat.punches, stat.name)}
-                                    className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 hover:underline text-xs font-semibold"
+                                    onClick={() => {
+                                      // Se não tiver userObj, cria um objeto mínimo com os dados disponíveis
+                                      const targetUser = userObj || {
+                                        id: stat.email ? allUsers.find(u => u.email === stat.email)?.id : null,
+                                        name: stat.name,
+                                        email: stat.email || null
+                                      };
+
+                                      if (!targetUser.id && !targetUser.email) {
+                                        alert('Não foi possível identificar este usuário. Use o script do console para deletar.');
+                                        return;
+                                      }
+
+                                      handleDeleteUser(targetUser);
+                                    }}
+                                    className="text-xs bg-slate-100 text-slate-600 hover:bg-red-100 hover:text-red-700 p-2 rounded-full font-bold transition-colors"
+                                    title="Excluir técnico e todos os seus dados"
                                   >
-                                    <MapPin size={14} /> Ver Mapa
+                                    <Trash2 size={14} />
                                   </button>
                                 </div>
-                              ) : <span className="text-slate-400 text-xs">Sem GPS</span>}
-                            </td>
-                            <td className="px-6 py-4 text-center">
-                              {userObj && (
-                                <button
-                                  onClick={() => toggleTracking(userObj)}
-                                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isTracking ? 'bg-green-500' : 'bg-slate-300'}`}
-                                >
-                                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isTracking ? 'translate-x-6' : 'translate-x-1'}`} />
-                                </button>
-                              )}
-                            </td>
-                            <td className="px-6 py-4 text-center">
-                              <div className="flex items-center justify-center gap-2">
-                                {(stat.status === 'Trabalhando' || stat.status === 'Em Almoço') && (
-                                  <button
-                                    onClick={() => handleManualClose(stat)}
-                                    className="text-xs bg-red-100 text-red-700 hover:bg-red-200 px-3 py-1 rounded-full font-bold transition-colors"
-                                  >
-                                    Encerrar Dia
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => {
-                                    // Se não tiver userObj, cria um objeto mínimo com os dados disponíveis
-                                    const targetUser = userObj || {
-                                      id: stat.email ? allUsers.find(u => u.email === stat.email)?.id : null,
-                                      name: stat.name,
-                                      email: stat.email || null
-                                    };
-
-                                    if (!targetUser.id && !targetUser.email) {
-                                      alert('Não foi possível identificar este usuário. Use o script do console para deletar.');
-                                      return;
-                                    }
-
-                                    handleDeleteUser(targetUser);
-                                  }}
-                                  className="text-xs bg-slate-100 text-slate-600 hover:bg-red-100 hover:text-red-700 p-2 rounded-full font-bold transition-colors"
-                                  title="Excluir técnico e todos os seus dados"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       {dailyStats.length === 0 && <tr><td colSpan="7" className="px-6 py-8 text-center text-slate-400">Nenhum técnico encontrado para esta data.</td></tr>}
                     </tbody>
                   </table>
@@ -2525,16 +2543,28 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                 </div>
                 <div className="flex-1">
                   <label className="block text-sm font-bold text-slate-700 mb-1">Colaborador</label>
-                  <select
-                    value={reportUser}
-                    onChange={(e) => setReportUser(e.target.value)}
-                    className="w-full bg-white border border-slate-300 rounded-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-                  >
-                    <option value="">Selecione um técnico...</option>
-                    {allUsers.filter(u => u.role !== 'admin').map(u => (
-                      <option key={u.id} value={u.id}>{u.name}</option>
-                    ))}
-                  </select>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Filtrar lista..."
+                      value={reportSearchTerm}
+                      onChange={(e) => setReportSearchTerm(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded-t-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none border-b-0"
+                    />
+                    <select
+                      value={reportUser}
+                      onChange={(e) => setReportUser(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded-b-lg px-4 py-2 font-medium text-slate-700 shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                      <option value="">Selecione um técnico...</option>
+                      {allUsers
+                        .filter(u => u.role !== 'admin')
+                        .filter(u => u.name.toLowerCase().includes(reportSearchTerm.toLowerCase()))
+                        .map(u => (
+                          <option key={u.id} value={u.id}>{u.name}</option>
+                        ))}
+                    </select>
+                  </div>
                 </div>
               </div>
             </div>
