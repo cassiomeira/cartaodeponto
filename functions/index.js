@@ -283,3 +283,136 @@ exports.checkSchedules = onSchedule({
 exports.forceCheckSchedules = onCall({ cors: true }, async (request) => {
     return await runScheduleCheck();
 });
+
+// --- VERIFICAÇÃO AUTOMÁTICA DE ALMOÇO (v1) ---
+async function runAutoLunchCheck() {
+    console.log("Iniciando verificação automática de almoço...");
+    const now = new Date();
+    const localNow = new Date(now.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+    const currentHour = localNow.getHours();
+    const currentMinute = localNow.getMinutes();
+    const currentTotalMinutes = currentHour * 60 + currentMinute;
+
+    // Data String (YYYY-MM-DD)
+    const year = localNow.getFullYear();
+    const month = String(localNow.getMonth() + 1).padStart(2, '0');
+    const day = String(localNow.getDate()).padStart(2, '0');
+    // Obs: O banco usa timestamp, mas precisamos comparar o dia.
+
+    let processedCount = 0;
+
+    // 1. Buscar Configurações Globais
+    let globalAutoLunch = { enabled: false, limitTime: '15:30', minutes: 60 };
+    try {
+        const settingsDoc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('notifications').get();
+        if (settingsDoc.exists) {
+            const sData = settingsDoc.data();
+            if (sData.autoLunch) {
+                globalAutoLunch = {
+                    enabled: sData.autoLunch.enabled ?? false,
+                    limitTime: sData.autoLunch.limitTime ?? '15:30',
+                    minutes: sData.autoLunch.minutes ?? 60
+                };
+            }
+        }
+    } catch (e) {
+        console.error("Erro ao buscar settings de almoço:", e);
+    }
+
+    // 2. Buscar Técnicos
+    const usersSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('users')
+        .where('role', '==', 'tech')
+        .get();
+
+    for (const docUser of usersSnapshot.docs) {
+        const user = { id: docUser.id, ...docUser.data() };
+
+        // Determinar configurações efetivas (Override vs Global)
+        let settings = { ...globalAutoLunch };
+        if (user.autoLunch && user.autoLunch.override) {
+            settings = {
+                enabled: user.autoLunch.enabled,
+                limitTime: user.autoLunch.limitTime,
+                minutes: user.autoLunch.deductionMinutes
+            };
+        }
+
+        if (!settings.enabled) continue;
+
+        // Parse Limite
+        const [limH, limM] = settings.limitTime.split(':').map(Number);
+        const limitTotalMinutes = limH * 60 + limM;
+
+        if (currentTotalMinutes > limitTotalMinutes) {
+            // Verificar Punches de Hoje
+            const punchesSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
+                .where('userEmail', '==', user.email)
+                .get();
+
+            // Filtra em memória para o dia de hoje (limitação do Firestore para query com range + filtro)
+            const todayPunches = [];
+            let hasEntry = false;
+            let hasExit = false;
+            let hasLunch = false;
+
+            punchesSnapshot.forEach(pDoc => {
+                const pData = pDoc.data();
+                const pDate = pData.timestamp.toDate();
+                if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth() && pDate.getFullYear() === localNow.getFullYear()) {
+                    todayPunches.push({ id: pDoc.id, ...pData });
+                    if (pData.type === 'entrada') hasEntry = true;
+                    if (pData.type === 'saida') hasExit = true;
+                    if (pData.type === 'saida_almoco' || pData.type === 'lunch_offline' || pData.type === 'auto_lunch') hasLunch = true;
+                }
+            });
+
+            // Lógica:
+            // - Tem Entrada
+            // - NÃO tem Saída (se já saiu, assumimos que o dia acabou e não mexemos, ou se quiser deduzir pós-saida, seria outra lógica. O user pediu pra mudar o botão de ação, então implica que o user inda está trabalhando)
+            // - NÃO tem Almoço
+            if (hasEntry && !hasExit && !hasLunch) {
+                console.log(`Aplicando Almoço Automático para ${user.name} (${settings.minutes} min).`);
+
+                // Inserir Punch
+                await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches').add({
+                    userEmail: user.email,
+                    userName: user.name,
+                    userId: user.id,
+                    type: 'auto_lunch',
+                    durationMinutes: settings.minutes, // Campo customizado usado no frontend
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    device: 'Sistema Automático',
+                    created_at: admin.firestore.FieldValue.serverTimestamp()
+                });
+
+                // Opcional: Notificar User
+                if (user.fcmTokens && user.fcmTokens.length > 0) {
+                    await admin.messaging().sendEachForMulticast({
+                        notification: {
+                            title: "Almoço Automático 🥪",
+                            body: `O sistema registrou um intervalo de ${settings.minutes}min pois você excedeu o horário limite.`
+                        },
+                        tokens: user.fcmTokens
+                    });
+                }
+
+                processedCount++;
+            }
+        }
+    }
+
+    return { success: true, processed: processedCount };
+}
+
+// --- AGENDAMENTO ALMOÇO (a cada 15 min) ---
+exports.checkAutoLunch = onSchedule({
+    schedule: "every 15 minutes",
+    timeZone: "America/Sao_Paulo",
+}, async (event) => {
+    await runAutoLunchCheck();
+});
+
+// --- FORÇAR ALMOÇO (Manual) ---
+exports.forceCheckAutoLunch = onCall({ cors: true }, async (request) => {
+    return await runAutoLunchCheck();
+});

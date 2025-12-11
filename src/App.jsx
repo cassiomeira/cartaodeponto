@@ -821,13 +821,12 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
   const getNextAction = () => {
     if (!lastPunch) return 'entrada';
 
-    // Se o último registro foi almoço offline, o próximo passo é encerrar o dia
-    if (lastPunch.type === 'lunch_offline') return 'saida';
+    // Se o último registro foi almoço offline ou automático, o próximo passo é encerrar o dia
+    if (lastPunch.type === 'lunch_offline' || lastPunch.type === 'auto_lunch') return 'saida';
 
     if (lastPunch.type === 'entrada') {
-      // Se já tiver almoço offline registrado hoje (mesmo que não seja o último punch, o que seria estranho mas possível),
-      // o próximo passo deve ser sair.
-      const hasOfflineLunch = todayPunches.some(p => p.type === 'lunch_offline');
+      // Se já tiver almoço offline/auto registrado hoje, o próximo passo deve ser sair.
+      const hasOfflineLunch = todayPunches.some(p => p.type === 'lunch_offline' || p.type === 'auto_lunch');
       if (hasOfflineLunch) return 'saida';
 
       return 'saida_almoco';
@@ -951,16 +950,20 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
               </div>
             )}
 
-            {/* Estado: Almoço Offline Ativo */}
-            {todayPunches.some(p => p.type === 'lunch_offline') && (
+            {/* Estado: Almoço Offline/Auto Ativo */}
+            {(todayPunches.some(p => p.type === 'lunch_offline') || todayPunches.some(p => p.type === 'auto_lunch')) && (
               <div className="bg-gray-100 border-l-4 border-gray-500 p-4 rounded-r-xl mb-6">
                 <div className="flex items-center gap-3">
                   <div className="bg-gray-200 p-2 rounded-full">
                     <MapPinOff size={24} className="text-gray-600" />
                   </div>
                   <div>
-                    <p className="font-bold text-gray-800">Almoço Offline Registrado</p>
-                    <p className="text-sm text-gray-600">Duração contabilizada: 1h fixa</p>
+                    <p className="font-bold text-gray-800">
+                      {todayPunches.some(p => p.type === 'auto_lunch') ? 'Almoço Automático Aplicado' : 'Almoço Offline Registrado'}
+                    </p>
+                    <p className="text-sm text-gray-600">
+                      {todayPunches.some(p => p.type === 'auto_lunch') ? 'Dedução automática por horário limite.' : 'Duração contabilizada: 1h fixa'}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -983,7 +986,16 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
                 {punch.type === 'saida' && <LogOut size={18} />}
               </div>
               <div className="flex-1">
-                <p className="font-bold text-slate-800 text-sm uppercase tracking-wide">{punch.type.replace('_', ' ')}</p>
+                <p className="font-bold text-slate-800 text-sm uppercase tracking-wide">
+                  {punch.type === 'entrada' ? 'Entrada' :
+                    punch.type === 'saida_almoco' ? 'Saída Almoço' :
+                      punch.type === 'volta_almoco' ? 'Volta Almoço' :
+                        punch.type === 'saida' ? 'Saída' :
+                          punch.type === 'lunch_offline' ? 'Almoço Offline' :
+                            punch.type === 'auto_lunch' ? 'Almoço Automático' :
+                              punch.type === 'justificativa_hora_extra' ? 'Justificativa Extra' :
+                                punch.type.replace('_', ' ')}
+                </p>
                 <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
                   {punch.location ? (
                     <>
@@ -1147,6 +1159,9 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     sunday: { active: false, start: '', end: '', lunchMinutes: 0 }
   });
 
+
+  const [techAutoLunch, setTechAutoLunch] = useState({ override: false, enabled: false, limitTime: '15:30', deductionMinutes: 60 });
+
   const openTechModal = (user) => {
     setSelectedTech(user);
     // Carrega escala existente ou usa padrão
@@ -1165,6 +1180,14 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         sunday: { active: false, start: '', end: '', lunchMinutes: 0 }
       });
     }
+
+    // Carrega Auto Lunch do usuário
+    if (user.autoLunch) {
+      setTechAutoLunch(user.autoLunch);
+    } else {
+      setTechAutoLunch({ override: false, enabled: false, limitTime: '15:30', deductionMinutes: 60 });
+    }
+
     setShowTechModal(true);
   };
 
@@ -1172,9 +1195,10 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     if (!selectedTech) return;
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', selectedTech.id), {
-        workSchedule: techSchedule
+        workSchedule: techSchedule,
+        autoLunch: techAutoLunch
       });
-      alert('Escala atualizada com sucesso!');
+      alert('Escala e configurações atualizadas com sucesso!');
       setShowTechModal(false);
     } catch (error) {
       console.error("Erro ao salvar escala:", error);
@@ -1339,6 +1363,11 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
   const [delayWindow, setDelayWindow] = useState(60); // Default 60 min
   const [overtimeWindow, setOvertimeWindow] = useState(120); // Default 120 min
 
+  // Estado para Almoço Automático Global
+  const [autoLunchEnabled, setAutoLunchEnabled] = useState(false);
+  const [autoLunchLimit, setAutoLunchLimit] = useState('15:30');
+  const [autoLunchMinutes, setAutoLunchMinutes] = useState(60);
+
   // Estados de Filtro de Busca
   const [searchTerm, setSearchTerm] = useState('');
   const [reportSearchTerm, setReportSearchTerm] = useState('');
@@ -1351,6 +1380,11 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
           const data = settingsDoc.data();
           if (data.delayWindow) setDelayWindow(data.delayWindow);
           if (data.overtimeWindow) setOvertimeWindow(data.overtimeWindow);
+          if (data.autoLunch) {
+            setAutoLunchEnabled(data.autoLunch.enabled ?? false);
+            setAutoLunchLimit(data.autoLunch.limitTime ?? '15:30');
+            setAutoLunchMinutes(data.autoLunch.minutes ?? 60);
+          }
         }
       } catch (error) {
         console.error("Erro ao carregar configurações:", error);
@@ -1363,7 +1397,12 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     try {
       await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'notifications'), {
         delayWindow,
-        overtimeWindow
+        overtimeWindow,
+        autoLunch: {
+          enabled: autoLunchEnabled,
+          limitTime: autoLunchLimit,
+          minutes: autoLunchMinutes
+        }
       }, { merge: true });
       alert('Configurações salvas com sucesso!');
     } catch (error) {
@@ -1810,12 +1849,28 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       const time = formatTime(p.dateObj);
       const mapsLink = p.location ? `https://www.google.com/maps/search/?api=1&query=${p.location.lat},${p.location.lng}` : 'Sem GPS';
 
+      const getPunchLabel = (type) => {
+        const types = {
+          'entrada': 'ENTRADA',
+          'saida_almoco': 'SAÍDA ALMOÇO',
+          'volta_almoco': 'VOLTA ALMOÇO',
+          'saida': 'SAÍDA',
+          'lunch_offline': 'ALMOÇO OFFLINE',
+          'auto_lunch': 'ALMOÇO AUTOMÁTICO',
+          'justificativa_hora_extra': 'JUSTIFICATIVA',
+          'atestado': 'ATESTADO',
+          'folga': 'FOLGA',
+          'ferias': 'FÉRIAS'
+        };
+        return types[type] || type.toUpperCase();
+      };
+
       return [
         `"${p.userName || 'Desconhecido'}"`,
         `"${p.userEmail || '-'}"`,
         date,
         time,
-        `"${p.type.toUpperCase()}"`,
+        `"${getPunchLabel(p.type)}"`,
         p.location ? p.location.lat : '',
         p.location ? p.location.lng : '',
         `"${mapsLink}"`
@@ -1970,9 +2025,11 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
           if (punch.type === 'saida_almoco') {
             lastLunchStart = punch.dateObj;
           }
-        } else if (punch.type === 'lunch_offline') {
-          // Almoço offline, contabiliza 1h fixa
-          userStat.lunchDurationMs += 3600000; // 1 hora
+        } else if (punch.type === 'lunch_offline' || punch.type === 'auto_lunch') {
+          // Almoço offline ou automático, contabiliza duração customizada ou 1h fixa
+          const duration = punch.durationMinutes ? (punch.durationMinutes * 60000) : 3600000;
+          userStat.lunchDurationMs += duration;
+
           // Se estava trabalhando, fecha o período de trabalho
           if (lastWorkStart) {
             userStat.totalWorkedMs += (punch.dateObj - lastWorkStart);
@@ -2004,15 +2061,11 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         if (last.type === 'saida') {
           userStat.status = 'Finalizado';
           userStat.completed = true;
-        } else if (last.type === 'lunch_offline') {
-          // Se o último registro foi almoço offline, ele tecnicamente já "voltou" do almoço (pois é instantâneo)
+        } else if (last.type === 'lunch_offline' || last.type === 'auto_lunch') {
+          // Se o último registro foi almoço offline/auto, ele tecnicamente já "voltou" do almoço (pois é instantâneo)
           // e está trabalhando até bater a saída.
-          // Mas como não temos um "lastWorkStart" aberto (pois fechamos ele ao bater lunch_offline),
-          // precisamos reabrir ou tratar esse caso.
-          // Melhor abordagem: Ao bater lunch_offline, definimos que ele continua trabalhando.
-          // O loop anterior fechou o workStart. Vamos ajustar o loop ou ajustar aqui.
 
-          // Ajuste aqui: Se o último foi lunch_offline, ele está trabalhando.
+          // Ajuste aqui: Se o último foi lunch_offline/auto, ele está trabalhando.
           userStat.status = 'Trabalhando';
           // E precisamos somar o tempo desde o registro do almoço offline até agora como trabalho
           if (isToday) userStat.totalWorkedMs += (now - last.dateObj);
@@ -2831,6 +2884,54 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                 </div>
               </div>
 
+              {/* Configuração de Almoço Automático (Global) */}
+              <div className="col-span-1 lg:col-span-2 bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
+                <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+                  <Coffee size={18} /> Configuração de Almoço Automático
+                </h3>
+                <div className="flex items-center gap-4 mb-4">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="autoLunchEnabled"
+                      checked={autoLunchEnabled}
+                      onChange={(e) => setAutoLunchEnabled(e.target.checked)}
+                      className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
+                    />
+                    <label htmlFor="autoLunchEnabled" className="text-sm font-medium text-slate-700 cursor-pointer">
+                      Habilitar Dedução Automática
+                    </label>
+                  </div>
+                </div>
+
+                {autoLunchEnabled && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Horário Limite</label>
+                      <input
+                        type="time"
+                        value={autoLunchLimit}
+                        onChange={(e) => setAutoLunchLimit(e.target.value)}
+                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <p className="text-xs text-slate-500 mt-1">Se não marcar almoço até este horário, o sistema deduz automaticamente.</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Dedução (Minutos)</label>
+                      <select
+                        value={autoLunchMinutes}
+                        onChange={(e) => setAutoLunchMinutes(Number(e.target.value))}
+                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                      >
+                        <option value={60}>1 Hora (60 min)</option>
+                        <option value={120}>2 Horas (120 min)</option>
+                      </select>
+                      <p className="text-xs text-slate-500 mt-1">Tempo descontado da jornada.</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Seleção de Usuários */}
               <div className="space-y-4">
                 <h3 className="font-bold text-slate-700 flex items-center gap-2">
@@ -2999,6 +3100,13 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                             <MapPin size={18} />
                           </button>
                           <button
+                            onClick={() => openTechModal(user)}
+                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                            title="Configurar Escala e Almoço"
+                          >
+                            <Calendar size={18} />
+                          </button>
+                          <button
                             onClick={() => toggleAdminRole(user)}
                             className={`p-2 rounded-lg transition-colors ${user.role === 'admin' ? 'text-purple-600 hover:bg-purple-50' : 'text-slate-400 hover:text-purple-600 hover:bg-purple-50'}`}
                             title={user.role === 'admin' ? 'Rebaixar para Técnico' : 'Promover para Admin'}
@@ -3036,6 +3144,61 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
 
                 <div className="p-6 max-h-[70vh] overflow-y-auto">
                   <div className="space-y-4">
+                    {/* Configuração de Auto Lunch (Override) */}
+                    <div className="p-4 bg-orange-50 border border-orange-100 rounded-lg mb-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <input
+                          type="checkbox"
+                          id="techOverrideConfirm"
+                          checked={techAutoLunch.override}
+                          onChange={(e) => setTechAutoLunch(prev => ({ ...prev, override: e.target.checked }))}
+                          className="w-4 h-4 text-orange-600 focus:ring-orange-500 rounded"
+                        />
+                        <label htmlFor="techOverrideConfirm" className="font-bold text-orange-800 text-sm">
+                          Sobrescrever Regra Global de Almoço
+                        </label>
+                      </div>
+
+                      {techAutoLunch.override && (
+                        <div className="pl-6 space-y-3 animate-in fade-in slide-in-from-top-2">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              id="techAutoLunchEnabled"
+                              checked={techAutoLunch.enabled}
+                              onChange={(e) => setTechAutoLunch(prev => ({ ...prev, enabled: e.target.checked }))}
+                              className="w-4 h-4 text-orange-600 focus:ring-orange-500 rounded"
+                            />
+                            <label htmlFor="techAutoLunchEnabled" className="text-sm font-medium text-slate-700">Habilitar Dedução</label>
+                          </div>
+
+                          {techAutoLunch.enabled && (
+                            <div className="grid grid-cols-2 gap-4">
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">Horário Limite</label>
+                                <input
+                                  type="time"
+                                  value={techAutoLunch.limitTime}
+                                  onChange={(e) => setTechAutoLunch(prev => ({ ...prev, limitTime: e.target.value }))}
+                                  className="w-full border border-slate-300 rounded px-2 py-1 text-sm"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">Dedução (Min)</label>
+                                <select
+                                  value={techAutoLunch.deductionMinutes}
+                                  onChange={(e) => setTechAutoLunch(prev => ({ ...prev, deductionMinutes: Number(e.target.value) }))}
+                                  className="w-full border border-slate-300 rounded px-2 py-1 text-sm bg-white"
+                                >
+                                  <option value={60}>60 min</option>
+                                  <option value={120}>120 min</option>
+                                </select>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map((day) => {
                       const dayLabels = { monday: 'Segunda', tuesday: 'Terça', wednesday: 'Quarta', thursday: 'Quinta', friday: 'Sexta', saturday: 'Sábado', sunday: 'Domingo' };
                       const config = techSchedule[day];
