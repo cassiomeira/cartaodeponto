@@ -35,6 +35,7 @@ import {
   LogOut,
   Coffee,
   AlertTriangle,
+  AlertCircle,
   CheckCircle,
   Map,
   UserCircle,
@@ -55,8 +56,12 @@ import {
   Trash2,
   BellRing,
   Loader2,
-  Search
+  Search,
+
+  FileDown
 } from 'lucide-react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -1830,6 +1835,28 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     }
   };
 
+  // Função para adicionar FALTA manual
+  const handleAddAbsence = async (user) => {
+    if (!window.confirm(`Confirmar registro de FALTA para ${user.name}? Isso gerará um saldo negativo de 8 horas para o dia de hoje.`)) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'punches'), {
+        userId: user.id || user.email, // Fallback se não tiver ID
+        userEmail: user.email,
+        userName: user.name,
+        type: 'falta',
+        timestamp: Timestamp.now(),
+        device: 'Painel Gestor',
+        created_at: Timestamp.now(),
+        justification: 'Falta registrada pelo gestor'
+      });
+      alert('Falta registrada com sucesso.');
+    } catch (error) {
+      console.error("Erro ao registrar falta:", error);
+      alert("Erro ao registrar falta.");
+    }
+  };
+
   // EXPORTAR PARA EXCEL (CSV)
   const exportToCSV = () => {
     const filteredData = punches.filter(p => {
@@ -1908,15 +1935,43 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       // Cria data combinando a data selecionada com a hora digitada (Formato ISO Local)
       const closeDate = new Date(`${selectedDate}T${manualCloseTime}:00`);
 
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'punches'), {
-        userId: selectedUserToClose.punches[0]?.userId || 'manual_admin', // Tenta pegar ID do primeiro ponto ou usa genérico
-        userEmail: selectedUserToClose.email,
-        userName: selectedUserToClose.name,
+      const userId = selectedUserToClose.punches[0]?.userId || 'manual_admin';
+      const userEmail = selectedUserToClose.email;
+      const userName = selectedUserToClose.name;
+
+      const batch = writeBatch(db);
+      const punchesCollection = collection(db, 'artifacts', appId, 'public', 'data', 'punches');
+
+      // Se o usuário estiver em almoço, precisamos fechar o almoço primeiro
+      if (selectedUserToClose.status === 'Em Almoço') {
+        // Adiciona Volta do Almoço (1 segundo antes da saída para garantir ordem, se necessário, mas mesmo timestamp ok)
+        const lunchBackRef = doc(punchesCollection);
+        batch.set(lunchBackRef, {
+          userId,
+          userEmail,
+          userName,
+          type: 'volta_almoco',
+          timestamp: closeDate,
+          location: null,
+          device: 'Ajuste Manual Gestor (Auto Volta)',
+          created_at: serverTimestamp() // Importante para ordenação se timestamps forem iguais
+        });
+      }
+
+      // Adiciona Saída Final
+      const exitRef = doc(punchesCollection);
+      batch.set(exitRef, {
+        userId,
+        userEmail,
+        userName,
         type: 'saida',
-        timestamp: closeDate, // Salva como objeto Date (Firestore converte)
+        timestamp: closeDate,
         location: null,
-        device: 'Ajuste Manual Gestor'
+        device: 'Ajuste Manual Gestor',
+        created_at: serverTimestamp()
       });
+
+      await batch.commit();
 
       setShowCloseModal(false);
       setSelectedUserToClose(null);
@@ -2142,33 +2197,29 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     return expectedMs;
   };
 
-  // Cálculo do Relatório Mensal
-  const monthlyStats = useMemo(() => {
-    if (!reportUser || !reportMonth) return [];
+  // Função auxiliar refatorada para cálculo de estatísticas (fora do hook se possível, ou dentro para acesso a run-time deps)
+  // Como depende de 'holidays' (estado), mantemos aqui.
+  const calculateUserStats = (userObj, monthStr, allPunches) => {
+    if (!userObj || !monthStr) return [];
 
-    const [year, month] = reportMonth.split('-').map(Number);
+    const [year, month] = monthStr.split('-').map(Number);
     const daysInMonth = new Date(year, month, 0).getDate();
     const stats = [];
 
-    // Encontra o objeto user original para obter a escala de trabalho
-    const reportUserObj = allUsers.find(u => u.id === reportUser);
-    if (!reportUserObj) return [];
-
     // Filtra punches do usuário e mês selecionados
-    const userPunches = punches.filter(p => {
+    const userPunches = allPunches.filter(p => {
       if (!p.timestamp) return false;
       const pDate = getDateFromTimestamp(p.timestamp);
       if (!pDate) return false;
 
-      // Verifica se é do usuário selecionado (comparando email, que é o vínculo comum)
-      const isUser = p.userEmail === reportUserObj.email;
+      // Verifica se é do usuário selecionado
+      const isUser = p.userEmail === userObj.email;
 
       return isUser &&
         pDate.getMonth() === month - 1 &&
         pDate.getFullYear() === year;
     });
 
-    // Gera estatísticas para cada dia do mês
     for (let day = 1; day <= daysInMonth; day++) {
       const currentDayDate = new Date(year, month - 1, day);
       const dayPunches = userPunches.filter(p => {
@@ -2176,7 +2227,6 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         return pDate.getDate() === day;
       }).sort((a, b) => getDateFromTimestamp(a.timestamp) - getDateFromTimestamp(b.timestamp));
 
-      // Identifica horários
       const entry = dayPunches.find(p => p.type === 'entrada');
       const lunchOut = dayPunches.find(p => p.type === 'saida_almoco');
       const lunchBack = dayPunches.find(p => p.type === 'volta_almoco');
@@ -2185,33 +2235,29 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       const atestado = dayPunches.find(p => p.type === 'atestado');
       const ferias = dayPunches.find(p => p.type === 'ferias');
       const folga = dayPunches.find(p => p.type === 'folga');
+      const falta = dayPunches.find(p => p.type === 'falta');
 
       let workedMs = 0;
       let lunchMs = 0;
 
       if (atestado || ferias || folga) {
-        // Se tem atestado, férias ou folga, tudo é zero
+        workedMs = 0;
+        lunchMs = 0;
+      } else if (falta) {
         workedMs = 0;
         lunchMs = 0;
       } else if (offlineLunch) {
-        lunchMs = 3600000; // 1 hora fixa
+        lunchMs = 3600000;
         if (entry && exit) {
           const totalDuration = exit.timestamp.toDate() - entry.timestamp.toDate();
           workedMs = totalDuration - lunchMs;
         } else if (entry) {
-          // Se ainda não saiu, calcula parcial até agora (opcional, mas mantendo simples: só calcula se tiver saída)
-          // Para "Trabalhando", podemos estimar, mas o saldo real só fecha na saída.
-          // Vamos manter 0 se não tiver saída para evitar confusão, ou calcular parcial se quiser.
-          // O código original calculava parcial se 'exit' não existisse mas 'entry' sim?
-          // O código original: if (entry && exit) ... else if (entry) ...
-          // Vamos adaptar:
           const now = new Date();
           const end = exit ? exit.timestamp.toDate() : now;
           const totalDuration = end - entry.timestamp.toDate();
           workedMs = Math.max(0, totalDuration - lunchMs);
         }
       } else {
-        // Cálculo Padrão
         if (lunchOut && lunchBack) {
           lunchMs = lunchBack.timestamp.toDate() - lunchOut.timestamp.toDate();
         }
@@ -2227,13 +2273,11 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         }
       }
 
-      // Correção para não ficar negativo se o almoço offline for maior que o tempo total (ex: acabou de entrar)
       if (workedMs < 0) workedMs = 0;
 
       const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][currentDayDate.getDay()];
-      let expectedMs = getExpectedWorkHours(dayOfWeek, reportUserObj, currentDayDate);
+      let expectedMs = getExpectedWorkHours(dayOfWeek, userObj, currentDayDate);
 
-      // Se for atestado, férias ou folga, a expectativa é 0
       if (atestado || ferias || folga) expectedMs = 0;
 
       const balanceMs = workedMs - expectedMs;
@@ -2245,18 +2289,20 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         lunchOut,
         lunchBack,
         exit,
-        offlineLunch, // Passa o objeto para exibir comentário
+        offlineLunch,
         workedMs,
         lunchMs,
         expectedMs,
         balanceMs,
         hasPunches: dayPunches.length > 0,
-        punches: dayPunches // Adicionado para permitir edição
+        punches: dayPunches
       });
     }
-
     return stats;
-  }, [punches, reportMonth, reportUser, allUsers]);
+  };
+  const monthlyStats = useMemo(() => {
+    return calculateUserStats(reportUserObj, reportMonth, punches);
+  }, [reportUserObj, reportMonth, punches]);
 
   const activeTechs = dailyStats.filter(s => s.status === 'Trabalhando').length;
   const onLunch = dailyStats.filter(s => s.status === 'Em Almoço').length;
@@ -2503,6 +2549,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                                 )}
                               </td>
                               <td className="px-6 py-4 text-center">
+
                                 <div className="flex items-center justify-center gap-2">
                                   {(stat.status === 'Trabalhando' || stat.status === 'Em Almoço') && (
                                     <button
@@ -2512,6 +2559,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                                       Encerrar Dia
                                     </button>
                                   )}
+
                                   <button
                                     onClick={() => {
                                       // Se não tiver userObj, cria um objeto mínimo com os dados disponíveis
@@ -2620,6 +2668,262 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                     </select>
                   </div>
                 </div>
+                <div className="flex-none flex gap-2">
+                  <button
+                    onClick={() => {
+                      if (confirm("Deseja gerar um relatório único contendo TODOS os colaboradores? Isso pode levar alguns segundos.")) {
+                        const doc = new jsPDF();
+                        const usersToExport = allUsers.filter(u => u.role !== 'admin').sort((a, b) => a.name.localeCompare(b.name));
+
+                        usersToExport.forEach((user, index) => {
+                          if (index > 0) doc.addPage();
+
+                          const userStats = calculateUserStats(user, reportMonth, punches);
+
+                          // CABEÇALHO
+                          doc.setFontSize(18);
+                          doc.setTextColor(40, 40, 40);
+                          doc.text("Relatório de Ponto - Netcar Telecom", 14, 22);
+
+                          doc.setFontSize(10);
+                          doc.setTextColor(100, 100, 100);
+                          doc.text(`Colaborador: ${user.name}`, 14, 32);
+                          doc.text(`Email: ${user.email}`, 14, 38);
+                          doc.text(`Mês Referência: ${reportMonth}`, 14, 44);
+                          doc.text(`Gerado em: ${new Date().toLocaleString()}`, 140, 32);
+
+                          // DADOS
+                          const tableColumn = ["Data", "Dia", "Entrada", "Saída Almoço", "Volta Almoço", "Saída", "Almoço", "Trabalhado", "Saldo"];
+                          const tableRows = [];
+
+                          userStats.forEach(stat => {
+                            const date = formatDate(stat.date);
+                            const dayOfWeek = stat.dayOfWeek === 'monday' ? 'Seg' :
+                              stat.dayOfWeek === 'tuesday' ? 'Ter' :
+                                stat.dayOfWeek === 'wednesday' ? 'Qua' :
+                                  stat.dayOfWeek === 'thursday' ? 'Qui' :
+                                    stat.dayOfWeek === 'friday' ? 'Sex' :
+                                      stat.dayOfWeek === 'saturday' ? 'Sáb' : 'Dom';
+
+                            const isAtestado = stat.punches.some(p => p.type === 'atestado');
+                            const isFerias = stat.punches.some(p => p.type === 'ferias');
+                            const isFolga = stat.punches.some(p => p.type === 'folga');
+                            const isFalta = stat.punches.some(p => p.type === 'falta');
+
+                            let entry = stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-';
+                            let lunchOut = stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-';
+                            let lunchBack = stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-';
+                            let exit = stat.exit ? formatTime(getDateFromTimestamp(stat.exit.timestamp)) : '-';
+                            let lunchTime = stat.lunchMs > 0 ? formatDuration(stat.lunchMs) : '-';
+                            let workedTime = stat.workedMs > 0 ? formatDuration(stat.workedMs) : '-';
+                            let balance = stat.balanceMs !== 0 ? (stat.balanceMs > 0 ? '+' : '') + formatDuration(stat.balanceMs) : '-';
+
+                            if (isAtestado) { entry = "ATESTADO"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                            else if (isFerias) { entry = "FÉRIAS"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                            else if (isFolga) { entry = "FOLGA"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                            else if (isFalta) { entry = "FALTA"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                            else if (stat.offlineLunch) { lunchOut = "Offline"; lunchBack = "Offline"; lunchTime = "1h (Fixo)"; }
+
+                            const rowData = [date, dayOfWeek, entry, lunchOut, lunchBack, exit, lunchTime, workedTime, balance];
+                            tableRows.push(rowData);
+                          });
+
+                          // TABELA
+                          autoTable(doc, {
+                            head: [tableColumn],
+                            body: tableRows,
+                            startY: 45,
+                            theme: 'grid',
+                            headStyles: { fillColor: [79, 70, 229], textColor: 255, fontStyle: 'bold', fontSize: 7, cellPadding: 1.5 },
+                            styles: { fontSize: 7, cellPadding: 1.5 },
+                            columnStyles: {
+                              0: { cellWidth: 20 },
+                              1: { cellWidth: 10 },
+                              8: { fontStyle: 'bold' }
+                            },
+                            alternateRowStyles: { fillColor: [249, 250, 251] },
+                            didParseCell: function (data) {
+                              if (data.section === 'body') {
+                                const rawRow = userStats[data.row.index];
+                                const isWeekend = rawRow.dayOfWeek === 'saturday' || rawRow.dayOfWeek === 'sunday';
+                                const isFalta = rawRow.punches.some(p => p.type === 'falta');
+                                if (isWeekend) data.cell.styles.fillColor = [241, 245, 249];
+                                if (isFalta) {
+                                  data.cell.styles.textColor = [220, 38, 38];
+                                  data.cell.styles.fontStyle = 'bold';
+                                }
+                              }
+                              if (data.section === 'body' && data.column.index === 8) {
+                                const rawRow = userStats[data.row.index];
+                                if (rawRow.balanceMs > 0) data.cell.styles.textColor = [22, 163, 74];
+                                else if (rawRow.balanceMs < 0) data.cell.styles.textColor = [220, 38, 38];
+                              }
+                            }
+                          });
+
+                          // Totais - ATUALIZADO: Soma até o dia atual (dias vazios contam como dívida, exceto se expected=0)
+                          const today = new Date();
+                          today.setHours(23, 59, 59, 999); // Inclui o dia de hoje inteiro na comparação
+
+                          const statsToSum = userStats.filter(s => s.date <= today);
+
+                          const totalBalanceMs = statsToSum.reduce((acc, curr) => acc + curr.balanceMs, 0);
+                          const totalPositiveMs = statsToSum.reduce((acc, curr) => (curr.balanceMs > 0 ? acc + curr.balanceMs : acc), 0);
+                          const totalNegativeMs = statsToSum.reduce((acc, curr) => (curr.balanceMs < 0 ? acc + curr.balanceMs : acc), 0);
+                          const totalWorkedMs = statsToSum.reduce((acc, curr) => acc + curr.workedMs, 0);
+
+                          let finalY = doc.lastAutoTable.finalY + 10;
+                          if (finalY + 40 > doc.internal.pageSize.height) {
+                            doc.addPage();
+                            finalY = 20;
+                          }
+
+                          doc.setFontSize(10);
+                          doc.setTextColor(50, 50, 50);
+                          doc.text(`Total Horas Trabalhadas: ${formatDuration(totalWorkedMs)}`, 14, finalY);
+                          doc.setTextColor(22, 163, 74);
+                          doc.text(`Total Horas Extras: +${formatDuration(totalPositiveMs)}`, 14, finalY + 6);
+                          doc.setTextColor(220, 38, 38);
+                          doc.text(`Total Horas Devidas: -${formatDuration(Math.abs(totalNegativeMs))}`, 14, finalY + 12);
+
+                          const isPositive = totalBalanceMs >= 0;
+                          doc.setFontSize(12);
+                          doc.setFont("helvetica", "bold");
+                          doc.setTextColor(isPositive ? 22 : 220, isPositive ? 163 : 38, isPositive ? 74 : 38);
+                          doc.text(`Saldo Líquido: ${isPositive ? '+' : '-'}${formatDuration(Math.abs(totalBalanceMs))}`, 14, finalY + 20);
+
+                          // Rodapé das páginas deste usuário (loop nas páginas geradas) - *Simplificação*: Apenas rodapé simples no final ou numerar depois?
+                          // Com jsPDF não é trivial repassar páginas passadas facilmente em loop único.
+                          // Vamos adicionar rodapé simples apenas na página atual ou usar um hook do autoTable
+                          // Mas pelo pedido "Uma página só", a maioria vai ter uma página.
+                          // Vamos simplificar o rodapé de página para não complicar o loop.
+                        });
+
+                        doc.save(`Relatorio_Geral_${reportMonth}.pdf`);
+                      }
+                    }}
+                    className="flex-none bg-indigo-600 text-white hover:bg-indigo-700 px-4 py-2 rounded-lg font-bold text-sm shadow-sm transition-colors flex items-center gap-2 h-[42px]"
+                  >
+                    <FileDown size={18} />
+                    Exportar Todos (PDF)
+                  </button>
+                  <button
+                    onClick={() => {
+                      // Função de Exportação PDF Individual
+                      const doc = new jsPDF();
+                      // ... (Código anterior de exportação individual) ...
+                      // Para evitar duplicidade de código excessiva, idealmente criaríamos uma função generatePDFPage(doc, user, stats), mas por segurança e rapidez vou manter a lógica isolada no botão "Todos" e deixar o botão "Individual" como estava (apenas chamando calculateUserStats se necessário, ou mantendo mensalStats).
+                      // ESPERA: O código abaixo é o que estava antes. Vou manter o botão original mas usando a nova função ou monthlyStats.
+                      // Na verdade, o replace vai substituir o botão anterior. Preciso recolocar o botão "Individual" E o botão "Todos".
+
+                      // RE-COLOCANDO O BOTÃO INDIVIDUAL (Lógica Repetida para garantir funcionamento sem mexer muito)
+
+                      const statsToExport = monthlyStats;
+                      const targetUser = reportUserObj;
+
+                      // ... Lógica idêntica ao anterior ...
+                      // Configuração do Logo e Cabeçalho
+                      doc.setFontSize(18);
+                      doc.setTextColor(40, 40, 40);
+                      doc.text("Relatório de Ponto - Netcar Telecom", 14, 22);
+
+                      doc.setFontSize(10);
+                      doc.setTextColor(100, 100, 100);
+                      doc.text(`Colaborador: ${targetUser.name}`, 14, 32);
+                      doc.text(`Email: ${targetUser.email}`, 14, 38);
+                      doc.text(`Mês Referência: ${reportMonth}`, 14, 44);
+                      doc.text(`Gerado em: ${new Date().toLocaleString()}`, 140, 32);
+
+                      const tableColumn = ["Data", "Dia", "Entrada", "Saída Almoço", "Volta Almoço", "Saída", "Almoço", "Trabalhado", "Saldo"];
+                      const tableRows = [];
+
+                      statsToExport.forEach(stat => {
+                        const date = formatDate(stat.date);
+                        const dayOfWeek = stat.dayOfWeek === 'monday' ? 'Seg' :
+                          stat.dayOfWeek === 'tuesday' ? 'Ter' :
+                            stat.dayOfWeek === 'wednesday' ? 'Qua' :
+                              stat.dayOfWeek === 'thursday' ? 'Qui' :
+                                stat.dayOfWeek === 'friday' ? 'Sex' :
+                                  stat.dayOfWeek === 'saturday' ? 'Sáb' : 'Dom';
+
+                        const isAtestado = stat.punches.some(p => p.type === 'atestado');
+                        const isFerias = stat.punches.some(p => p.type === 'ferias');
+                        const isFolga = stat.punches.some(p => p.type === 'folga');
+                        const isFalta = stat.punches.some(p => p.type === 'falta');
+
+                        let entry = stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-';
+                        let lunchOut = stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-';
+                        let lunchBack = stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-';
+                        let exit = stat.exit ? formatTime(getDateFromTimestamp(stat.exit.timestamp)) : '-';
+                        let lunchTime = stat.lunchMs > 0 ? formatDuration(stat.lunchMs) : '-';
+                        let workedTime = stat.workedMs > 0 ? formatDuration(stat.workedMs) : '-';
+                        let balance = stat.balanceMs !== 0 ? (stat.balanceMs > 0 ? '+' : '') + formatDuration(stat.balanceMs) : '-';
+
+                        if (isAtestado) { entry = "ATESTADO"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                        else if (isFerias) { entry = "FÉRIAS"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                        else if (isFolga) { entry = "FOLGA"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                        else if (isFalta) { entry = "FALTA"; lunchOut = ""; lunchBack = ""; exit = ""; }
+                        else if (stat.offlineLunch) { lunchOut = "Offline"; lunchBack = "Offline"; lunchTime = "1h (Fixo)"; }
+
+                        tableRows.push([date, dayOfWeek, entry, lunchOut, lunchBack, exit, lunchTime, workedTime, balance]);
+                      });
+
+                      autoTable(doc, {
+                        head: [tableColumn],
+                        body: tableRows,
+                        startY: 45,
+                        theme: 'grid',
+                        headStyles: { fillColor: [79, 70, 229], textColor: 255, fontStyle: 'bold', fontSize: 7, cellPadding: 1.5 },
+                        styles: { fontSize: 7, cellPadding: 1.5 },
+                        columnStyles: { 0: { cellWidth: 20 }, 1: { cellWidth: 10 }, 8: { fontStyle: 'bold' } },
+                        alternateRowStyles: { fillColor: [249, 250, 251] },
+                        didParseCell: function (data) {
+                          if (data.section === 'body') {
+                            const rawRow = statsToExport[data.row.index];
+                            const isWeekend = rawRow.dayOfWeek === 'saturday' || rawRow.dayOfWeek === 'sunday';
+                            const isFalta = rawRow.punches.some(p => p.type === 'falta');
+                            if (isWeekend) data.cell.styles.fillColor = [241, 245, 249];
+                            if (isFalta) { data.cell.styles.textColor = [220, 38, 38]; data.cell.styles.fontStyle = 'bold'; }
+                          }
+                          if (data.section === 'body' && data.column.index === 8) {
+                            const rawRow = statsToExport[data.row.index];
+                            if (rawRow.balanceMs > 0) data.cell.styles.textColor = [22, 163, 74];
+                            else if (rawRow.balanceMs < 0) data.cell.styles.textColor = [220, 38, 38];
+                          }
+                        }
+                      });
+
+                      // Totais Footer (Individual) - ATUALIZADO
+                      const today = new Date();
+                      today.setHours(23, 59, 59, 999);
+
+                      const statsToSum = statsToExport.filter(s => s.date <= today);
+
+                      const totalBalanceMs = statsToSum.reduce((acc, curr) => acc + curr.balanceMs, 0);
+                      const totalPositiveMs = statsToSum.reduce((acc, curr) => (curr.balanceMs > 0 ? acc + curr.balanceMs : acc), 0);
+                      const totalNegativeMs = statsToSum.reduce((acc, curr) => (curr.balanceMs < 0 ? acc + curr.balanceMs : acc), 0);
+                      const totalWorkedMs = statsToSum.reduce((acc, curr) => acc + curr.workedMs, 0);
+
+                      let finalY = doc.lastAutoTable.finalY + 10;
+                      if (finalY + 40 > doc.internal.pageSize.height) { doc.addPage(); finalY = 20; }
+
+                      doc.setFontSize(10); doc.setTextColor(50, 50, 50);
+                      doc.text(`Total Horas Trabalhadas: ${formatDuration(totalWorkedMs)}`, 14, finalY);
+                      doc.setTextColor(22, 163, 74); doc.text(`Total Horas Extras: +${formatDuration(totalPositiveMs)}`, 14, finalY + 6);
+                      doc.setTextColor(220, 38, 38); doc.text(`Total Horas Devidas: -${formatDuration(Math.abs(totalNegativeMs))}`, 14, finalY + 12);
+                      const isPositive = totalBalanceMs >= 0;
+                      doc.setFontSize(12); doc.setFont("helvetica", "bold");
+                      doc.setTextColor(isPositive ? 22 : 220, isPositive ? 163 : 38, isPositive ? 74 : 38);
+                      doc.text(`Saldo Líquido: ${isPositive ? '+' : '-'}${formatDuration(Math.abs(totalBalanceMs))}`, 14, finalY + 20);
+
+                      doc.save(`Relatorio_Ponto_${targetUser.name.replace(/ /g, '_')}_${reportMonth}.pdf`);
+                    }}
+                    className="flex-none bg-red-600 text-white hover:bg-red-700 px-4 py-2 rounded-lg font-bold text-sm shadow-sm transition-colors flex items-center gap-2 h-[42px]"
+                  >
+                    <FileDown size={18} />
+                    Exportar PDF
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2654,6 +2958,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                         const isAtestado = stat.punches.some(p => p.type === 'atestado');
                         const isFerias = stat.punches.some(p => p.type === 'ferias');
                         const isFolga = stat.punches.some(p => p.type === 'folga');
+                        const isFalta = stat.punches.some(p => p.type === 'falta');
 
                         return (
                           <tr key={idx} className={`hover:bg-slate-50 transition-colors ${isAbsent ? 'bg-red-50/30' : ''} ${isWeekend ? 'bg-slate-50/50' : ''}`}>
@@ -2667,16 +2972,16 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                                         stat.dayOfWeek === 'saturday' ? 'Sáb' : 'Dom'}
                             </td>
                             <td className="px-4 py-3 text-center">
-                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-')}
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : isFalta ? <span className="text-xs font-bold text-orange-600">Falta</span> : (stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-')}
                             </td>
                             <td className="px-4 py-3 text-center">
-                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-'))}
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : isFalta ? <span className="text-xs font-bold text-orange-600">Falta</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-'))}
                             </td>
                             <td className="px-4 py-3 text-center">
-                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-'))}
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : isFalta ? <span className="text-xs font-bold text-orange-600">Falta</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-'))}
                             </td>
                             <td className="px-4 py-3 text-center">
-                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : (
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : isFalta ? <span className="text-xs font-bold text-orange-600">Falta</span> : (
                                 stat.exit ? (
                                   <div className="flex flex-col items-center">
                                     <span>{formatTime(getDateFromTimestamp(stat.exit.timestamp))}</span>
@@ -2724,13 +3029,30 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                     </tbody>
                     <tfoot>
                       {(() => {
-                        const totalBalanceMs = monthlyStats.reduce((acc, curr) => acc + curr.balanceMs, 0);
+                        const today = new Date();
+                        today.setHours(23, 59, 59, 999);
+
+                        const statsToSum = monthlyStats.filter(s => s.date <= today);
+
+                        const totalBalanceMs = statsToSum.reduce((acc, curr) => acc + curr.balanceMs, 0);
+                        const totalPositiveMs = statsToSum.reduce((acc, curr) => (curr.balanceMs > 0 ? acc + curr.balanceMs : acc), 0);
+                        const totalNegativeMs = statsToSum.reduce((acc, curr) => (curr.balanceMs < 0 ? acc + curr.balanceMs : acc), 0);
+                        const totalWorkedMs = statsToSum.reduce((acc, curr) => acc + curr.workedMs, 0);
                         const isPositive = totalBalanceMs >= 0;
+
                         return (
                           <tr className="bg-slate-100 border-t-2 border-slate-200 font-bold">
-                            <td colSpan="8" className="px-4 py-3 text-right text-slate-700 uppercase text-xs tracking-wider">Saldo Total:</td>
-                            <td colSpan="2" className={`px-4 py-3 text-center ${isPositive ? 'text-green-700 bg-green-50' : 'text-red-700 bg-red-50'}`}>
-                              {isPositive ? '+' : '-'}{formatDuration(Math.abs(totalBalanceMs))}
+                            <td colSpan="8" className="px-4 py-3 text-right text-slate-700 uppercase text-xs tracking-wider">
+                              Totais (Até Hoje):
+                            </td>
+                            <td colSpan="2" className="px-4 py-3 text-center text-xs">
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="text-green-700">Extra: +{formatDuration(totalPositiveMs)}</span>
+                                <span className="text-red-700">Devido: -{formatDuration(Math.abs(totalNegativeMs))}</span>
+                                <span className={`border-t border-slate-300 w-full pt-1 ${isPositive ? 'text-green-700' : 'text-red-700'}`}>
+                                  Líquido: {isPositive ? '+' : '-'}{formatDuration(Math.abs(totalBalanceMs))}
+                                </span>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -2739,396 +3061,399 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                   </table>
                 </div>
               </div>
-            )
-            }
-          </div>
-        )
-        }
-
-        {activeTab === 'holidays' && (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="font-bold text-lg text-slate-700 flex items-center gap-2"><Calendar size={20} /> Gestão de Feriados</h3>
-              <button
-                onClick={importNationalHolidays}
-                className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 py-2 rounded-lg font-bold text-sm transition-colors"
-              >
-                Importar Feriados Nacionais
-              </button>
-            </div>
-
-            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex gap-4 items-end">
-              <div className="flex-1">
-                <label className="block text-xs font-bold text-slate-500 mb-1">Data</label>
-                <input
-                  type="date"
-                  value={newHolidayDate}
-                  onChange={(e) => setNewHolidayDate(e.target.value)}
-                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              <div className="flex-[2]">
-                <label className="block text-xs font-bold text-slate-500 mb-1">Nome do Feriado</label>
-                <input
-                  type="text"
-                  value={newHolidayName}
-                  onChange={(e) => setNewHolidayName(e.target.value)}
-                  placeholder="Ex: Aniversário da Cidade"
-                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              <button
-                onClick={addHoliday}
-                className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold text-sm transition-colors h-[38px]"
-              >
-                Adicionar
-              </button>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
-                    <th className="px-4 py-3 font-semibold">Data</th>
-                    <th className="px-4 py-3 font-semibold">Nome</th>
-                    <th className="px-4 py-3 font-semibold text-right">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
-                  {holidays.sort((a, b) => a.date.localeCompare(b.date)).map((h) => (
-                    <tr key={h.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-3 font-mono">{formatDate(new Date(h.date + 'T12:00:00'))}</td>
-                      <td className="px-4 py-3 font-bold">{h.name}</td>
-                      <td className="px-4 py-3 text-right">
-                        <button onClick={() => deleteHoliday(h.id)} className="text-red-500 hover:text-red-700 p-1">
-                          <Trash2 size={18} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {holidays.length === 0 && (
-                    <tr>
-                      <td colSpan="3" className="px-4 py-8 text-center text-slate-400">
-                        Nenhum feriado cadastrado.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )
-        }
-
-        {activeTab === 'notifications' && (
-          <div className="bg-white rounded-2xl shadow-xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-300">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="p-3 bg-indigo-100 rounded-xl">
-                <Mail className="text-indigo-600" size={24} />
-              </div>
-              <div>
-                <h2 className="text-xl font-bold text-slate-800">Enviar Notificações</h2>
-                <p className="text-sm text-slate-500">Envie mensagens para os técnicos via aplicativo.</p>
-              </div>
-              <button
-                onClick={handleForceCheck}
-                disabled={isSendingNotification}
-                className="px-4 py-2 bg-orange-100 text-orange-700 rounded-lg hover:bg-orange-200 transition-colors font-medium flex items-center gap-2"
-              >
-                {isSendingNotification ? <Loader2 className="animate-spin" size={18} /> : <BellRing size={18} />}
-                Forçar Verificação Automática
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              {/* Configurações de Janela de Tempo */}
-              <div className="col-span-1 lg:col-span-2 bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
-                <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
-                  <Settings size={18} /> Configuração de Janelas de Verificação
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Janela de Atraso (minutos após início)</label>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        value={delayWindow}
-                        onChange={(e) => setDelayWindow(Number(e.target.value))}
-                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                        placeholder="Ex: 60"
-                      />
-                    </div>
-                    <p className="text-xs text-slate-500 mt-1">Tempo após o início do expediente para verificar atrasos.</p>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Janela de Hora Extra (minutos após fim)</label>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        value={overtimeWindow}
-                        onChange={(e) => setOvertimeWindow(Number(e.target.value))}
-                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                        placeholder="Ex: 120"
-                      />
-                    </div>
-                    <p className="text-xs text-slate-500 mt-1">Tempo após o fim do expediente para verificar horas extras.</p>
-                  </div>
-                </div>
-                <div className="mt-3 flex justify-end">
-                  <button
-                    onClick={saveNotificationSettings}
-                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium"
-                  >
-                    Salvar Configurações
-                  </button>
-                </div>
-              </div>
-
-              {/* Configuração de Almoço Automático (Global) */}
-              <div className="col-span-1 lg:col-span-2 bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
-                <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
-                  <Coffee size={18} /> Configuração de Almoço Automático
-                </h3>
-                <div className="flex items-center gap-4 mb-4">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      id="autoLunchEnabled"
-                      checked={autoLunchEnabled}
-                      onChange={(e) => setAutoLunchEnabled(e.target.checked)}
-                      className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
-                    />
-                    <label htmlFor="autoLunchEnabled" className="text-sm font-medium text-slate-700 cursor-pointer">
-                      Habilitar Dedução Automática
-                    </label>
-                  </div>
-                </div>
-
-                {autoLunchEnabled && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1">Horário Limite</label>
-                      <input
-                        type="time"
-                        value={autoLunchLimit}
-                        onChange={(e) => setAutoLunchLimit(e.target.value)}
-                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                      />
-                      <p className="text-xs text-slate-500 mt-1">Se não marcar almoço até este horário, o sistema deduz automaticamente.</p>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1">Dedução (Minutos)</label>
-                      <select
-                        value={autoLunchMinutes}
-                        onChange={(e) => setAutoLunchMinutes(Number(e.target.value))}
-                        className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                      >
-                        <option value={60}>1 Hora (60 min)</option>
-                        <option value={120}>2 Horas (120 min)</option>
-                      </select>
-                      <p className="text-xs text-slate-500 mt-1">Tempo descontado da jornada.</p>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Seleção de Usuários */}
-              <div className="space-y-4">
-                <h3 className="font-bold text-slate-700 flex items-center gap-2">
-                  <Users size={18} /> Destinatários
-                </h3>
-                <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 max-h-[400px] overflow-y-auto">
-                  <div className="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                    <input
-                      type="checkbox"
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedUsersForNotification(allUsers.filter(u => u.role === 'tech').map(u => u.id));
-                        } else {
-                          setSelectedUsersForNotification([]);
-                        }
-                      }}
-                      checked={selectedUsersForNotification.length === allUsers.filter(u => u.role === 'tech').length && allUsers.filter(u => u.role === 'tech').length > 0}
-                      className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
-                    />
-                    <span className="font-semibold text-slate-700">Selecionar Todos</span>
-                  </div>
-
-                  <div className="space-y-2">
-                    {allUsers.filter(u => u.role === 'tech').map(user => (
-                      <label key={user.id} className="flex items-center gap-3 p-3 bg-white rounded-lg border border-slate-100 hover:border-indigo-200 cursor-pointer transition-colors">
-                        <input
-                          type="checkbox"
-                          checked={selectedUsersForNotification.includes(user.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedUsersForNotification([...selectedUsersForNotification, user.id]);
-                            } else {
-                              setSelectedUsersForNotification(selectedUsersForNotification.filter(id => id !== user.id));
-                            }
-                          }}
-                          className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
-                        />
-                        <div className="flex-1">
-                          <div className="font-medium text-slate-800">{user.name}</div>
-                          <div className="text-xs text-slate-500">{user.email}</div>
-                        </div>
-                        {user.fcmTokens && user.fcmTokens.length > 0 ? (
-                          <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full flex items-center gap-1">
-                            <Smartphone size={12} /> App Ativo
-                          </span>
-                        ) : (
-                          <span className="text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded-full">
-                            Sem App
-                          </span>
-                        )}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="text-sm text-slate-500 text-right">
-                  {selectedUsersForNotification.length} usuários selecionados
-                </div>
-              </div>
-
-              {/* Composição da Mensagem */}
-              <div className="space-y-4">
-                <h3 className="font-bold text-slate-700 flex items-center gap-2">
-                  <FileText size={18} /> Mensagem
-                </h3>
-                <div className="space-y-4 bg-slate-50 p-6 rounded-xl border border-slate-200">
-                  <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Título</label>
-                    <input
-                      type="text"
-                      value={notificationTitle}
-                      onChange={(e) => setNotificationTitle(e.target.value)}
-                      placeholder="Ex: Aviso Importante"
-                      className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-1">Conteúdo</label>
-                    <textarea
-                      value={notificationBody}
-                      onChange={(e) => setNotificationBody(e.target.value)}
-                      placeholder="Digite sua mensagem aqui..."
-                      rows={6}
-                      className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
-                    />
-                  </div>
-                  <button
-                    onClick={handleSendNotification}
-                    disabled={selectedUsersForNotification.length === 0 || !notificationTitle || !notificationBody || isSendingNotification}
-                    className={`w-full py-3 rounded-xl font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 ${selectedUsersForNotification.length === 0 || !notificationTitle || !notificationBody || isSendingNotification ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 active:scale-95'}`}
-                  >
-                    {isSendingNotification ? (
-                      <>Enviando...</>
-                    ) : (
-                      <><ArrowRight size={20} /> Enviar Notificação</>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </div>
+            )}
           </div>
         )}
 
-        {activeTab === 'admins' && (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
-              <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users size={20} className="text-indigo-600" /> Gestão de Usuários</h3>
-              <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600">Total: {allUsers.length}</span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
-                    <th className="px-6 py-4 font-semibold">Usuário</th>
-                    <th className="px-6 py-4 font-semibold">Cidade</th>
-                    <th className="px-6 py-4 font-semibold">Função</th>
-                    <th className="px-6 py-4 font-semibold text-center">Rastreamento</th>
-                    <th className="px-6 py-4 font-semibold text-right">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
-                  {allUsers.map((user) => (
-                    <tr key={user.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-6 py-4">
-                        <div className="font-bold text-slate-800">{user.name}</div>
-                        <div className="text-xs text-slate-400">{user.email}</div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2 group">
-                          <span className="text-sm text-slate-600">{user.city || 'Sem cidade'}</span>
-                          <button
-                            onClick={() => openCityModal(user)}
-                            className="text-slate-300 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-all"
-                            title="Editar Cidade"
-                          >
-                            <Settings size={14} />
-                          </button>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${user.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-slate-100 text-slate-800'}`}>
-                          {user.role === 'admin' ? 'Administrador' : 'Técnico'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <button
-                          onClick={() => toggleTracking(user)}
-                          className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${user.trackingEnabled !== false ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}
-                        >
-                          {user.trackingEnabled !== false ? 'Ativo' : 'Inativo'}
-                        </button>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            onClick={() => openPasswordModal(user)}
-                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-                            title="Trocar Senha"
-                          >
-                            <Lock size={18} />
-                          </button>
-                          <button
-                            onClick={() => openLocationPicker(user)}
-                            className={`p-2 rounded-lg transition-colors ${user.allowedLocation ? 'text-green-600 hover:bg-green-50' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}
-                            title={user.allowedLocation ? "Local Configurado (Clique para alterar)" : "Configurar Local de Trabalho"}
-                          >
-                            <MapPin size={18} />
-                          </button>
-                          <button
-                            onClick={() => openTechModal(user)}
-                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-                            title="Configurar Escala e Almoço"
-                          >
-                            <Calendar size={18} />
-                          </button>
-                          <button
-                            onClick={() => toggleAdminRole(user)}
-                            className={`p-2 rounded-lg transition-colors ${user.role === 'admin' ? 'text-purple-600 hover:bg-purple-50' : 'text-slate-400 hover:text-purple-600 hover:bg-purple-50'}`}
-                            title={user.role === 'admin' ? 'Rebaixar para Técnico' : 'Promover para Admin'}
-                          >
-                            <UserPlus size={18} />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteUser(user)}
-                            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                            title="Excluir Usuário"
-                          >
+        {
+          activeTab === 'holidays' && (
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-2"><Calendar size={20} /> Gestão de Feriados</h3>
+                <button
+                  onClick={importNationalHolidays}
+                  className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 py-2 rounded-lg font-bold text-sm transition-colors"
+                >
+                  Importar Feriados Nacionais
+                </button>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex gap-4 items-end">
+                <div className="flex-1">
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Data</label>
+                  <input
+                    type="date"
+                    value={newHolidayDate}
+                    onChange={(e) => setNewHolidayDate(e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div className="flex-[2]">
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Nome do Feriado</label>
+                  <input
+                    type="text"
+                    value={newHolidayName}
+                    onChange={(e) => setNewHolidayName(e.target.value)}
+                    placeholder="Ex: Aniversário da Cidade"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <button
+                  onClick={addHoliday}
+                  className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold text-sm transition-colors h-[38px]"
+                >
+                  Adicionar
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
+                      <th className="px-4 py-3 font-semibold">Data</th>
+                      <th className="px-4 py-3 font-semibold">Nome</th>
+                      <th className="px-4 py-3 font-semibold text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
+                    {holidays.sort((a, b) => a.date.localeCompare(b.date)).map((h) => (
+                      <tr key={h.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-3 font-mono">{formatDate(new Date(h.date + 'T12:00:00'))}</td>
+                        <td className="px-4 py-3 font-bold">{h.name}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button onClick={() => deleteHoliday(h.id)} className="text-red-500 hover:text-red-700 p-1">
                             <Trash2 size={18} />
                           </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        </td>
+                      </tr>
+                    ))}
+                    {holidays.length === 0 && (
+                      <tr>
+                        <td colSpan="3" className="px-4 py-8 text-center text-slate-400">
+                          Nenhum feriado cadastrado.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div >
+          )
+        }
+
+        {
+          activeTab === 'notifications' && (
+            <div className="bg-white rounded-2xl shadow-xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-300">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-3 bg-indigo-100 rounded-xl">
+                  <Mail className="text-indigo-600" size={24} />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-slate-800">Enviar Notificações</h2>
+                  <p className="text-sm text-slate-500">Envie mensagens para os técnicos via aplicativo.</p>
+                </div>
+                <button
+                  onClick={handleForceCheck}
+                  disabled={isSendingNotification}
+                  className="px-4 py-2 bg-orange-100 text-orange-700 rounded-lg hover:bg-orange-200 transition-colors font-medium flex items-center gap-2"
+                >
+                  {isSendingNotification ? <Loader2 className="animate-spin" size={18} /> : <BellRing size={18} />}
+                  Forçar Verificação Automática
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                {/* Configurações de Janela de Tempo */}
+                <div className="col-span-1 lg:col-span-2 bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
+                  <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+                    <Settings size={18} /> Configuração de Janelas de Verificação
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Janela de Atraso (minutos após início)</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          value={delayWindow}
+                          onChange={(e) => setDelayWindow(Number(e.target.value))}
+                          className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                          placeholder="Ex: 60"
+                        />
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">Tempo após o início do expediente para verificar atrasos.</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Janela de Hora Extra (minutos após fim)</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          value={overtimeWindow}
+                          onChange={(e) => setOvertimeWindow(Number(e.target.value))}
+                          className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                          placeholder="Ex: 120"
+                        />
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">Tempo após o fim do expediente para verificar horas extras.</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex justify-end">
+                    <button
+                      onClick={saveNotificationSettings}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium"
+                    >
+                      Salvar Configurações
+                    </button>
+                  </div>
+                </div>
+
+                {/* Configuração de Almoço Automático (Global) */}
+                <div className="col-span-1 lg:col-span-2 bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
+                  <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+                    <Coffee size={18} /> Configuração de Almoço Automático
+                  </h3>
+                  <div className="flex items-center gap-4 mb-4">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="autoLunchEnabled"
+                        checked={autoLunchEnabled}
+                        onChange={(e) => setAutoLunchEnabled(e.target.checked)}
+                        className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
+                      />
+                      <label htmlFor="autoLunchEnabled" className="text-sm font-medium text-slate-700 cursor-pointer">
+                        Habilitar Dedução Automática
+                      </label>
+                    </div>
+                  </div>
+
+                  {autoLunchEnabled && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Horário Limite</label>
+                        <input
+                          type="time"
+                          value={autoLunchLimit}
+                          onChange={(e) => setAutoLunchLimit(e.target.value)}
+                          className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                        />
+                        <p className="text-xs text-slate-500 mt-1">Se não marcar almoço até este horário, o sistema deduz automaticamente.</p>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Dedução (Minutos)</label>
+                        <select
+                          value={autoLunchMinutes}
+                          onChange={(e) => setAutoLunchMinutes(Number(e.target.value))}
+                          className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                        >
+                          <option value={60}>1 Hora (60 min)</option>
+                          <option value={120}>2 Horas (120 min)</option>
+                        </select>
+                        <p className="text-xs text-slate-500 mt-1">Tempo descontado da jornada.</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Seleção de Usuários */}
+                <div className="space-y-4">
+                  <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                    <Users size={18} /> Destinatários
+                  </h3>
+                  <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 max-h-[400px] overflow-y-auto">
+                    <div className="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                      <input
+                        type="checkbox"
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedUsersForNotification(allUsers.filter(u => u.role === 'tech').map(u => u.id));
+                          } else {
+                            setSelectedUsersForNotification([]);
+                          }
+                        }}
+                        checked={selectedUsersForNotification.length === allUsers.filter(u => u.role === 'tech').length && allUsers.filter(u => u.role === 'tech').length > 0}
+                        className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
+                      />
+                      <span className="font-semibold text-slate-700">Selecionar Todos</span>
+                    </div>
+
+                    <div className="space-y-2">
+                      {allUsers.filter(u => u.role === 'tech').map(user => (
+                        <label key={user.id} className="flex items-center gap-3 p-3 bg-white rounded-lg border border-slate-100 hover:border-indigo-200 cursor-pointer transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={selectedUsersForNotification.includes(user.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedUsersForNotification([...selectedUsersForNotification, user.id]);
+                              } else {
+                                setSelectedUsersForNotification(selectedUsersForNotification.filter(id => id !== user.id));
+                              }
+                            }}
+                            className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500"
+                          />
+                          <div className="flex-1">
+                            <div className="font-medium text-slate-800">{user.name}</div>
+                            <div className="text-xs text-slate-500">{user.email}</div>
+                          </div>
+                          {user.fcmTokens && user.fcmTokens.length > 0 ? (
+                            <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full flex items-center gap-1">
+                              <Smartphone size={12} /> App Ativo
+                            </span>
+                          ) : (
+                            <span className="text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded-full">
+                              Sem App
+                            </span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="text-sm text-slate-500 text-right">
+                    {selectedUsersForNotification.length} usuários selecionados
+                  </div>
+                </div>
+
+                {/* Composição da Mensagem */}
+                <div className="space-y-4">
+                  <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                    <FileText size={18} /> Mensagem
+                  </h3>
+                  <div className="space-y-4 bg-slate-50 p-6 rounded-xl border border-slate-200">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">Título</label>
+                      <input
+                        type="text"
+                        value={notificationTitle}
+                        onChange={(e) => setNotificationTitle(e.target.value)}
+                        placeholder="Ex: Aviso Importante"
+                        className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">Conteúdo</label>
+                      <textarea
+                        value={notificationBody}
+                        onChange={(e) => setNotificationBody(e.target.value)}
+                        placeholder="Digite sua mensagem aqui..."
+                        rows={6}
+                        className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
+                      />
+                    </div>
+                    <button
+                      onClick={handleSendNotification}
+                      disabled={selectedUsersForNotification.length === 0 || !notificationTitle || !notificationBody || isSendingNotification}
+                      className={`w-full py-3 rounded-xl font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 ${selectedUsersForNotification.length === 0 || !notificationTitle || !notificationBody || isSendingNotification ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 active:scale-95'}`}
+                    >
+                      {isSendingNotification ? (
+                        <>Enviando...</>
+                      ) : (
+                        <><ArrowRight size={20} /> Enviar Notificação</>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-        )}
+          )
+        }
+
+        {
+          activeTab === 'admins' && (
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users size={20} className="text-indigo-600" /> Gestão de Usuários</h3>
+                <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600">Total: {allUsers.length}</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
+                      <th className="px-6 py-4 font-semibold">Usuário</th>
+                      <th className="px-6 py-4 font-semibold">Cidade</th>
+                      <th className="px-6 py-4 font-semibold">Função</th>
+                      <th className="px-6 py-4 font-semibold text-center">Rastreamento</th>
+                      <th className="px-6 py-4 font-semibold text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
+                    {allUsers.map((user) => (
+                      <tr key={user.id} className="hover:bg-slate-50 transition-colors">
+                        <td className="px-6 py-4">
+                          <div className="font-bold text-slate-800">{user.name}</div>
+                          <div className="text-xs text-slate-400">{user.email}</div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2 group">
+                            <span className="text-sm text-slate-600">{user.city || 'Sem cidade'}</span>
+                            <button
+                              onClick={() => openCityModal(user)}
+                              className="text-slate-300 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-all"
+                              title="Editar Cidade"
+                            >
+                              <Settings size={14} />
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${user.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-slate-100 text-slate-800'}`}>
+                            {user.role === 'admin' ? 'Administrador' : 'Técnico'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 text-center">
+                          <button
+                            onClick={() => toggleTracking(user)}
+                            className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${user.trackingEnabled !== false ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}
+                          >
+                            {user.trackingEnabled !== false ? 'Ativo' : 'Inativo'}
+                          </button>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              onClick={() => openPasswordModal(user)}
+                              className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                              title="Trocar Senha"
+                            >
+                              <Lock size={18} />
+                            </button>
+                            <button
+                              onClick={() => openLocationPicker(user)}
+                              className={`p-2 rounded-lg transition-colors ${user.allowedLocation ? 'text-green-600 hover:bg-green-50' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}
+                              title={user.allowedLocation ? "Local Configurado (Clique para alterar)" : "Configurar Local de Trabalho"}
+                            >
+                              <MapPin size={18} />
+                            </button>
+                            <button
+                              onClick={() => openTechModal(user)}
+                              className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                              title="Configurar Escala e Almoço"
+                            >
+                              <Calendar size={18} />
+                            </button>
+                            <button
+                              onClick={() => toggleAdminRole(user)}
+                              className={`p-2 rounded-lg transition-colors ${user.role === 'admin' ? 'text-purple-600 hover:bg-purple-50' : 'text-slate-400 hover:text-purple-600 hover:bg-purple-50'}`}
+                              title={user.role === 'admin' ? 'Rebaixar para Técnico' : 'Promover para Admin'}
+                            >
+                              <UserPlus size={18} />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteUser(user)}
+                              className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                              title="Excluir Usuário"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )
+        }
         {/* MODAL DETALHES TÉCNICO (ESCALA) */}
         {
           showTechModal && selectedTech && (
@@ -3332,7 +3657,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                           value={punch.time}
                           onChange={(e) => handlePunchChange(idx, 'time', e.target.value)}
                           className="border border-slate-300 rounded px-2 py-1 text-sm font-mono"
-                          disabled={punch.type === 'atestado' || punch.type === 'folga'}
+                          disabled={punch.type === 'atestado' || punch.type === 'folga' || punch.type === 'falta'}
                         />
                         <select
                           value={punch.type}
@@ -3346,6 +3671,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                           <option value="lunch_offline">Almoço Offline</option>
                           <option value="atestado">Atestado Médico</option>
                           <option value="folga">Folga</option>
+                          <option value="falta">Falta (Ausência)</option>
                         </select>
                         <button
                           onClick={() => handleRemovePunchRow(idx)}
@@ -3385,6 +3711,16 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                       className="flex-1 py-2 border-2 border-dashed border-teal-300 text-teal-500 rounded-lg hover:border-teal-500 hover:text-teal-600 font-bold text-sm transition-colors flex items-center justify-center gap-2"
                     >
                       <Coffee size={16} /> Registrar Folga
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (window.confirm("Isso removerá todos os registros do dia e marcará como FALTA (Ausência). Continuar?")) {
+                          setEditingPunches([{ id: `temp_${Date.now()}`, type: 'falta', time: '00:00', isNew: true }]);
+                        }
+                      }}
+                      className="flex-1 py-2 border-2 border-dashed border-orange-300 text-orange-500 rounded-lg hover:border-orange-500 hover:text-orange-600 font-bold text-sm transition-colors flex items-center justify-center gap-2"
+                    >
+                      <AlertCircle size={16} /> Registrar Falta
                     </button>
                   </div>
 
@@ -3451,230 +3787,238 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
           )
         }
         {/* Modal de Edição de Cidade */}
-        {showCityModal && (
-          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-              <div className="bg-indigo-600 p-6 text-white flex justify-between items-center">
-                <h3 className="text-xl font-bold flex items-center gap-2">
-                  <MapPin size={24} /> Editar Cidade
-                </h3>
-                <button onClick={() => setShowCityModal(false)} className="text-white/80 hover:text-white">
-                  <X size={24} />
-                </button>
-              </div>
-              <div className="p-6 space-y-4">
-                <p className="text-sm text-slate-600">
-                  Defina a cidade para o técnico <strong>{selectedUserForCity?.name}</strong>.
-                </p>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Cidade</label>
-                  <input
-                    type="text"
-                    value={newCity}
-                    onChange={(e) => setNewCity(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
-                    placeholder="Ex: São Paulo"
-                    autoFocus
-                  />
-                </div>
-                <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={() => setShowCityModal(false)}
-                    className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    onClick={handleUpdateCity}
-                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
-                  >
-                    Salvar
+        {
+          showCityModal && (
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                <div className="bg-indigo-600 p-6 text-white flex justify-between items-center">
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <MapPin size={24} /> Editar Cidade
+                  </h3>
+                  <button onClick={() => setShowCityModal(false)} className="text-white/80 hover:text-white">
+                    <X size={24} />
                   </button>
                 </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Modal de Alteração de Credenciais (Senha e Email) */}
-        {showPasswordModal && selectedUserForPassword && (
-          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-              <div className="bg-slate-800 p-6 text-white flex justify-between items-center">
-                <h3 className="text-xl font-bold flex items-center gap-2">
-                  <Lock size={24} /> Gerenciar Credenciais
-                </h3>
-                <button onClick={() => setShowPasswordModal(false)} className="text-white/80 hover:text-white">
-                  <X size={24} />
-                </button>
-              </div>
-              <div className="p-6 space-y-4">
-                <p className="text-sm text-slate-600">
-                  Alterando dados de acesso para <strong>{selectedUserForPassword.name}</strong>.
-                </p>
-
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">E-mail de Acesso</label>
-                  <div className="relative">
-                    <Mail size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="email"
-                      value={newEmail}
-                      onChange={(e) => setNewEmail(e.target.value)}
-                      className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
-                      placeholder="novo.email@empresa.com"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Nova Senha</label>
-                  <div className="relative">
-                    <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-600">
+                    Defina a cidade para o técnico <strong>{selectedUserForCity?.name}</strong>.
+                  </p>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">Cidade</label>
                     <input
                       type="text"
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
-                      placeholder="Deixe vazio para manter a atual"
+                      value={newCity}
+                      onChange={(e) => setNewCity(e.target.value)}
+                      className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      placeholder="Ex: São Paulo"
+                      autoFocus
                     />
                   </div>
-                  <p className="text-xs text-slate-400 mt-1">Mínimo de 6 caracteres recomendado.</p>
-                </div>
-
-                <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={() => setShowPasswordModal(false)}
-                    className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    onClick={handleUpdateUserCredentials}
-                    className="flex-1 bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl shadow-lg transition-all active:scale-95"
-                  >
-                    Salvar Alterações
-                  </button>
+                  <div className="flex gap-3 pt-2">
+                    <button
+                      onClick={() => setShowCityModal(false)}
+                      className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={handleUpdateCity}
+                      className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
+                    >
+                      Salvar
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          )
+        }
+
+        {/* Modal de Alteração de Credenciais (Senha e Email) */}
+        {
+          showPasswordModal && selectedUserForPassword && (
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                <div className="bg-slate-800 p-6 text-white flex justify-between items-center">
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <Lock size={24} /> Gerenciar Credenciais
+                  </h3>
+                  <button onClick={() => setShowPasswordModal(false)} className="text-white/80 hover:text-white">
+                    <X size={24} />
+                  </button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-600">
+                    Alterando dados de acesso para <strong>{selectedUserForPassword.name}</strong>.
+                  </p>
+
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">E-mail de Acesso</label>
+                    <div className="relative">
+                      <Mail size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="email"
+                        value={newEmail}
+                        onChange={(e) => setNewEmail(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                        placeholder="novo.email@empresa.com"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">Nova Senha</label>
+                    <div className="relative">
+                      <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                        placeholder="Deixe vazio para manter a atual"
+                      />
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1">Mínimo de 6 caracteres recomendado.</p>
+                  </div>
+
+                  <div className="flex gap-3 pt-2">
+                    <button
+                      onClick={() => setShowPasswordModal(false)}
+                      className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={handleUpdateUserCredentials}
+                      className="flex-1 bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl shadow-lg transition-all active:scale-95"
+                    >
+                      Salvar Alterações
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        }
 
         {/* MODAL DE ROTA DIÁRIA */}
-        {showRouteModal && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[2000] p-4">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                <div>
-                  <h3 className="text-xl font-bold text-slate-800">Rota Diária: {selectedRouteUser}</h3>
-                  <p className="text-sm text-slate-500">Visualizando {selectedRoutePunches.length} registros de localização</p>
+        {
+          showRouteModal && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[2000] p-4">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
+                <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-800">Rota Diária: {selectedRouteUser}</h3>
+                    <p className="text-sm text-slate-500">Visualizando {selectedRoutePunches.length} registros de localização</p>
+                  </div>
+                  <button
+                    onClick={() => setShowRouteModal(false)}
+                    className="text-slate-400 hover:text-slate-600 p-2 rounded-full hover:bg-slate-200 transition-colors"
+                  >
+                    <X size={24} />
+                  </button>
                 </div>
-                <button
-                  onClick={() => setShowRouteModal(false)}
-                  className="text-slate-400 hover:text-slate-600 p-2 rounded-full hover:bg-slate-200 transition-colors"
-                >
-                  <X size={24} />
-                </button>
-              </div>
 
-              <div className="relative bg-slate-100 h-[600px] w-full">
-                <MapContainer
-                  key={selectedRouteUser} // Força re-render ao mudar de usuário
-                  bounds={selectedRoutePunches.map(p => [p.location.lat, p.location.lng])}
-                  zoom={13}
-                  style={{ height: '100%', width: '100%' }}
-                >
-                  <TileLayer
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                  />
-                  {selectedRoutePunches.map((punch, idx) => (
-                    <Marker key={punch.id || idx} position={[punch.location.lat, punch.location.lng]}>
-                      <Popup>
-                        <div className="text-center min-w-[150px]">
-                          <strong className="block text-lg capitalize mb-1">
-                            {punch.type === 'entrada' ? 'Entrada' :
-                              punch.type === 'saida_almoco' ? 'Saída Almoço' :
-                                punch.type === 'volta_almoco' ? 'Volta Almoço' :
-                                  punch.type === 'saida' ? 'Saída' : punch.type}
-                          </strong>
-                          <span className="text-sm font-mono bg-slate-100 px-2 py-1 rounded block mb-2">
-                            {formatTime(punch.timestamp.toDate())}
-                          </span>
-                          {punch.justification && (
-                            <p className="text-xs text-slate-500 italic border-t border-slate-200 pt-2 mt-2">
-                              "{punch.justification}"
-                            </p>
-                          )}
-                          <div className="text-[10px] text-slate-400 mt-2">
-                            Precisão: {Math.round(punch.location.accuracy || 0)}m
+                <div className="relative bg-slate-100 h-[600px] w-full">
+                  <MapContainer
+                    key={selectedRouteUser} // Força re-render ao mudar de usuário
+                    bounds={selectedRoutePunches.map(p => [p.location.lat, p.location.lng])}
+                    zoom={13}
+                    style={{ height: '100%', width: '100%' }}
+                  >
+                    <TileLayer
+                      attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    />
+                    {selectedRoutePunches.map((punch, idx) => (
+                      <Marker key={punch.id || idx} position={[punch.location.lat, punch.location.lng]}>
+                        <Popup>
+                          <div className="text-center min-w-[150px]">
+                            <strong className="block text-lg capitalize mb-1">
+                              {punch.type === 'entrada' ? 'Entrada' :
+                                punch.type === 'saida_almoco' ? 'Saída Almoço' :
+                                  punch.type === 'volta_almoco' ? 'Volta Almoço' :
+                                    punch.type === 'saida' ? 'Saída' : punch.type}
+                            </strong>
+                            <span className="text-sm font-mono bg-slate-100 px-2 py-1 rounded block mb-2">
+                              {formatTime(punch.timestamp.toDate())}
+                            </span>
+                            {punch.justification && (
+                              <p className="text-xs text-slate-500 italic border-t border-slate-200 pt-2 mt-2">
+                                "{punch.justification}"
+                              </p>
+                            )}
+                            <div className="text-[10px] text-slate-400 mt-2">
+                              Precisão: {Math.round(punch.location.accuracy || 0)}m
+                            </div>
                           </div>
-                        </div>
-                      </Popup>
-                    </Marker>
-                  ))}
-                </MapContainer>
+                        </Popup>
+                      </Marker>
+                    ))}
+                  </MapContainer>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )
+        }
 
         {/* MODAL DE SELEÇÃO DE LOCAL (GEOFENCING) */}
-        {showLocationPicker && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[2000] p-4">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                <div>
-                  <h3 className="text-xl font-bold text-slate-800">Definir Local de Trabalho: {selectedUserForLocation?.name}</h3>
-                  <p className="text-sm text-slate-500">Clique no mapa para definir o centro da área permitida.</p>
+        {
+          showLocationPicker && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[2000] p-4">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
+                <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-800">Definir Local de Trabalho: {selectedUserForLocation?.name}</h3>
+                    <p className="text-sm text-slate-500">Clique no mapa para definir o centro da área permitida.</p>
+                  </div>
+                  <button
+                    onClick={() => setShowLocationPicker(false)}
+                    className="text-slate-400 hover:text-slate-600 p-2 rounded-full hover:bg-slate-200 transition-colors"
+                  >
+                    <X size={24} />
+                  </button>
                 </div>
-                <button
-                  onClick={() => setShowLocationPicker(false)}
-                  className="text-slate-400 hover:text-slate-600 p-2 rounded-full hover:bg-slate-200 transition-colors"
-                >
-                  <X size={24} />
-                </button>
-              </div>
 
-              <div className="p-4 bg-white border-b border-slate-100 flex items-center gap-4">
-                <div className="flex-1">
-                  <label className="block text-sm font-bold text-slate-700 mb-1">Raio Permitido (metros)</label>
-                  <input
-                    type="number"
-                    value={tempLocation?.radius || 200}
-                    onChange={(e) => setTempLocation({ ...tempLocation, radius: Number(e.target.value) })}
-                    className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
-                  />
+                <div className="p-4 bg-white border-b border-slate-100 flex items-center gap-4">
+                  <div className="flex-1">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Raio Permitido (metros)</label>
+                    <input
+                      type="number"
+                      value={tempLocation?.radius || 200}
+                      onChange={(e) => setTempLocation({ ...tempLocation, radius: Number(e.target.value) })}
+                      className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    />
+                  </div>
+                  <button
+                    onClick={handleSaveLocation}
+                    className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg shadow transition-colors flex items-center gap-2"
+                  >
+                    <Save size={18} /> Salvar Local
+                  </button>
                 </div>
-                <button
-                  onClick={handleSaveLocation}
-                  className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg shadow transition-colors flex items-center gap-2"
-                >
-                  <Save size={18} /> Salvar Local
-                </button>
-              </div>
 
-              <div className="relative bg-slate-100 h-[500px] w-full">
-                <MapContainer
-                  center={[tempLocation?.lat || -14.2350, tempLocation?.lng || -51.9253]}
-                  zoom={15}
-                  style={{ height: '100%', width: '100%' }}
-                >
-                  <TileLayer
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                  />
-                  <LocationMarker
-                    position={tempLocation}
-                    setPosition={setTempLocation}
-                    radius={tempLocation?.radius}
-                  />
-                </MapContainer>
+                <div className="relative bg-slate-100 h-[500px] w-full">
+                  <MapContainer
+                    center={[tempLocation?.lat || -14.2350, tempLocation?.lng || -51.9253]}
+                    zoom={15}
+                    style={{ height: '100%', width: '100%' }}
+                  >
+                    <TileLayer
+                      attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    />
+                    <LocationMarker
+                      position={tempLocation}
+                      setPosition={setTempLocation}
+                      radius={tempLocation?.radius}
+                    />
+                  </MapContainer>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )
+        }
       </main >
     </div >
   );
