@@ -71,6 +71,9 @@ import { PushNotifications } from '@capacitor/push-notifications';
 
 // Fix Leaflet marker icon issue
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+
+// Import Device Plugin
+import { Device } from '@capacitor/device';
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
 import markerShadow from 'leaflet/dist/images/marker-shadow.png';
 
@@ -210,7 +213,7 @@ const LoginScreen = ({ onLogin }) => {
       }
     } catch (err) {
       console.error(err);
-      setError('Erro ao verificar e-mail. Tente novamente.');
+      setError(`Erro ao verificar e-mail: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -756,6 +759,33 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
   const proceedWithPunch = async (type, justificationText) => {
     setLoading(true);
     setStatus('Obtendo localização GPS...');
+
+    // --- DEVICE LOCK CHECK (Mobile Only) ---
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const idObj = await Device.getId();
+        const currentDeviceId = idObj.uuid;
+
+        // Verifica se o usuário tem dispositivo vinculado
+        if (currentUserData.trustedDeviceId) {
+          if (currentUserData.trustedDeviceId !== currentDeviceId) {
+            alert("⛔ ERRO DE SEGURANÇA ⛔\n\nEste aparelho não é o seu dispositivo cadastrado!\n\nO registro de ponto só é permitido no seu celular oficial.");
+            setLoading(false);
+            setStatus('');
+            return; // BLOQUEIA O PONTO
+          }
+        } else {
+          // Caso raro: Logou, mas não vinculou (banco offline?).
+          // Podemos deixar passar ou bloquear. Como vincula no login, deve ter.
+          // Se não tiver, vincula agora? Melhor não arriscar, deixa passar e vincula no próximo login ou aqui.
+        }
+      } catch (err) {
+        console.error("Erro ao validar dispositivo:", err);
+        // Em caso de erro técnico no plugin, bloqueamos ou liberamos?
+        // Por segurança, melhor alertar, mas permitir se for erro de plugin? 
+        // Vamos logar e seguir.
+      }
+    }
 
     if (!navigator.geolocation) {
       alert('Seu navegador não suporta geolocalização.');
@@ -2560,6 +2590,28 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                                     </button>
                                   )}
 
+                                  {/* Botão RESETAR DISPOSITIVO */}
+                                  {userObj && (
+                                    <button
+                                      onClick={async () => {
+                                        if (!confirm(`Deseja desvincular o aparelho de ${userObj.name}?\n\nIsso permitirá que ele cadastre um novo celular no próximo login.`)) return;
+                                        try {
+                                          await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userObj.id), {
+                                            trustedDeviceId: null,
+                                            trustedDeviceModel: null
+                                          });
+                                          alert("Aparelho desvinculado com sucesso!");
+                                        } catch (e) {
+                                          alert("Erro ao desvincular.");
+                                        }
+                                      }}
+                                      className="text-xs bg-orange-100 text-orange-600 hover:bg-orange-200 p-2 rounded-full font-bold transition-colors"
+                                      title="Redefinir Aparelho (Desbloquear Novo Celular)"
+                                    >
+                                      <Smartphone size={14} />
+                                    </button>
+                                  )}
+
                                   <button
                                     onClick={() => {
                                       // Se não tiver userObj, cria um objeto mínimo com os dados disponíveis
@@ -4166,9 +4218,36 @@ export default function App() {
     setupNotifications();
   }, [user, currentUserData]);
 
-  const handleLogin = (data) => {
+  const handleLogin = async (data) => {
     setCurrentUserData(data);
     localStorage.setItem('ponto_app_user_id', data.id);
+
+    // --- DEVICE LOCKING: Bind device on Login ---
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const idObj = await Device.getId();
+        const currentDeviceId = idObj.uuid;
+        console.log("Device ID (Login):", currentDeviceId);
+
+        // Se o usuário ainda não tem um dispositivo confiável, VINCULAR AGORA
+        if (!data.trustedDeviceId) {
+          const info = await Device.getInfo();
+          await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', data.id), {
+            trustedDeviceId: currentDeviceId,
+            trustedDeviceModel: info.model || 'Unknown'
+          });
+          console.log("Dispositivo vinculado com sucesso:", currentDeviceId);
+        } else {
+          // Se já tem, verificamos (Opcional: avisar se for diferente, mas login geralmente libera)
+          if (data.trustedDeviceId !== currentDeviceId) {
+            console.warn("Aviso: Logando em dispositivo diferente do vinculado.");
+            // Não bloqueamos o login por enquanto, apenas o Ponto.
+          }
+        }
+      } catch (err) {
+        console.error("Erro ao verificar dispositivo no login:", err);
+      }
+    }
   };
 
   const handleLogout = () => {
