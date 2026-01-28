@@ -57,7 +57,10 @@ import {
   BellRing,
   Loader2,
   Search,
-
+  User,
+  Shield,
+  Bell,
+  Check,
   FileDown
 } from 'lucide-react';
 import jsPDF from 'jspdf';
@@ -77,12 +80,16 @@ import { Device } from '@capacitor/device';
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
 import markerShadow from 'leaflet/dist/images/marker-shadow.png';
 
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: markerIcon2x,
-  iconUrl: markerIcon,
-  shadowUrl: markerShadow,
-});
+// Fix Leaflet marker icon issue
+const fixLeafletIcons = () => {
+  delete L.Icon.Default.prototype._getIconUrl;
+  L.Icon.Default.mergeOptions({
+    iconRetinaUrl: markerIcon2x,
+    iconUrl: markerIcon,
+    shadowUrl: markerShadow,
+  });
+};
+fixLeafletIcons();
 
 // --- CONFIGURAÇÃO FIREBASE (CHAVES REAIS) ---
 const firebaseConfig = {
@@ -107,8 +114,299 @@ try {
   console.log("Messaging not supported (probably running in a non-browser env or during build)", e);
 }
 
-// ID fixo para o aplicativo (usado nas coleções do banco)
-const appId = "cartao-de-ponto-5e801";
+// --- TELA DE CADASTRO DE NOVA EMPRESA (Novo Cliente) ---
+const CompanyRegistrationScreen = ({ onRegister, onBack }) => {
+  const [companyName, setCompanyName] = useState('');
+  const [adminName, setAdminName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    if (!companyName || !adminName || !email || !password) {
+      setError('Preencha todos os campos obrigatórios.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // 1. Verificar se email já existe no REGISTRO GLOBAL
+      const registryDoc = await getDoc(doc(db, 'artifacts', 'global_registry', 'public', 'data', 'users', email.toLowerCase().trim()));
+      if (registryDoc.exists()) {
+        setError('Este e-mail já está em uso por outra empresa.');
+        setLoading(false);
+        return;
+      }
+
+      // 2. Gerar ID da Empresa
+      const newCompanyId = `empresa-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 5)}`;
+
+      // 3. Criar Usuário Admin na Empresa
+      const newUser = {
+        email: email.toLowerCase().trim(),
+        name: adminName.trim(),
+        phone: phone.trim(),
+        password: password.trim(),
+        role: 'admin',
+        createdAt: serverTimestamp(),
+        companyName: companyName.trim()
+      };
+
+      await setDoc(doc(db, 'artifacts', newCompanyId, 'public', 'data', 'users', 'admin_01'), newUser);
+
+      // 4. Registrar no GLOBAL REGISTRY (Path corrigido: public/data/users)
+      await setDoc(doc(db, 'artifacts', 'global_registry', 'public', 'data', 'users', email.toLowerCase().trim()), {
+        companyId: newCompanyId,
+        role: 'admin',
+        registeredAt: serverTimestamp()
+      });
+
+      // 5. Login Automático
+      onRegister(newCompanyId, { id: 'admin_01', ...newUser });
+
+    } catch (err) {
+      console.error("Erro ao criar empresa:", err);
+      setError('Erro ao criar empresa. Tente novamente.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md relative overflow-hidden animate-in fade-in slide-in-from-right-8">
+        <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-green-400 to-blue-500"></div>
+
+        <h2 className="text-2xl font-bold text-slate-800 mb-2">Nova Empresa</h2>
+        <p className="text-slate-500 mb-6">Crie um ambiente exclusivo para sua equipe.</p>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex items-center gap-2">
+            <AlertTriangle size={16} /> {error}
+          </div>
+        )}
+
+        <form onSubmit={handleRegister} className="space-y-4">
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">Nome da Empresa</label>
+            <input type="text" required value={companyName} onChange={e => setCompanyName(e.target.value)} className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ex: TecnoSoluções Ltda" />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">Seu Nome (Gestor)</label>
+            <input type="text" required value={adminName} onChange={e => setAdminName(e.target.value)} className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Nome Completo" />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">E-mail de Acesso</label>
+            <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="gestor@empresa.com" />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">Senha</label>
+            <input type="password" required value={password} onChange={e => setPassword(e.target.value)} className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Crie uma senha forte" />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">Telefone</label>
+            <input type="tel" value={phone} onChange={e => setPhone(e.target.value)} className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="(Opicional)" />
+          </div>
+
+          <button type="submit" disabled={loading} className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg transition-all shadow-lg mt-2">
+            {loading ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full mx-auto" /> : 'Criar Ambiente'}
+          </button>
+
+          <button type="button" onClick={onBack} className="w-full text-sm text-slate-500 hover:text-slate-800 py-2">
+            Voltar para Login
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+
+// 1. Tela de Login INTELIGENTE
+const LoginScreen = ({ onLogin, setGlobalCompanyId }) => {
+  const [step, setStep] = useState('check_email'); // check_email, login_password, new_company
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [detectedCompanyId, setDetectedCompanyId] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  // Verifica email no REGISTRO GLOBAL ou LEGADO
+  const checkEmail = async (e) => {
+    e.preventDefault();
+    if (!email.trim() || !email.includes('@')) {
+      setError('Por favor, digite um e-mail válido.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      const cleanEmail = email.toLowerCase().trim();
+      let foundCompanyId = null;
+
+      // 1. Tenta no REGISTRO GLOBAL (Novo Padrão)
+      // Ajuste de Path: 'public/data/users' para manter padrão de segurança
+      const registryDoc = await getDoc(doc(db, 'artifacts', 'global_registry', 'public', 'data', 'users', cleanEmail));
+
+      if (registryDoc.exists()) {
+        foundCompanyId = registryDoc.data().companyId;
+        console.log("Encontrado no registro global:", foundCompanyId);
+      } else {
+        // 2. Fallback: Tenta na empresa LEGADO
+        const legacyId = "cartao-de-ponto-5e801";
+        const q = query(collection(db, 'artifacts', legacyId, 'public', 'data', 'users'), where('email', '==', cleanEmail));
+        const legacySnap = await getDocs(q);
+
+        if (!legacySnap.empty) {
+          foundCompanyId = legacyId;
+          console.log("Encontrado no sistema legado:", foundCompanyId);
+        }
+      }
+
+      if (foundCompanyId) {
+        setDetectedCompanyId(foundCompanyId);
+        setStep('login_password');
+      } else {
+        setError('Usuário não encontrado. Solicite o cadastro ao seu gestor.');
+      }
+
+    } catch (err) {
+      console.error(err);
+      setError(`Erro de conexão: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLoginPassword = async (e) => {
+    e.preventDefault();
+    if (!password) { setError('Digite sua senha.'); return; }
+
+    setLoading(true);
+    try {
+      // Busca usuário dentro da empresa detectada
+      const usersRef = collection(db, 'artifacts', detectedCompanyId, 'public', 'data', 'users');
+      const q = query(usersRef, where('email', '==', email.toLowerCase().trim()));
+      const querySnapshot = await getDocs(q);
+
+      if (!querySnapshot.empty) {
+        const userDoc = querySnapshot.docs[0];
+        const userData = userDoc.data();
+
+        if (userData.password === password) {
+          // SUCESSO!
+          setGlobalCompanyId(detectedCompanyId); // Atualiza estado global do App
+          onLogin({ id: userDoc.id, ...userData });
+        } else {
+          setError('Senha incorreta.');
+        }
+      } else {
+        setError('Erro estranho: Usuário sumiu entre as etapas.');
+      }
+    } catch (err) {
+      setError('Erro ao realizar login.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (step === 'new_company') {
+    return <CompanyRegistrationScreen onRegister={(compId, user) => {
+      setGlobalCompanyId(compId);
+      onLogin(user);
+    }} onBack={() => setStep('check_email')} />;
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md relative overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-blue-500 to-indigo-600"></div>
+
+        <div className="text-center mb-8 mt-2">
+          <div className="bg-blue-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg shadow-blue-600/30">
+            <Clock className="text-white w-8 h-8" />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800">Ponto Digital</h1>
+          <p className="text-slate-500">Acesso Corporativo</p>
+        </div>
+
+        {error && (
+          <div className="mb-6 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex items-center gap-2 border border-red-100 animate-pulse">
+            <AlertTriangle size={16} />
+            {error}
+          </div>
+        )}
+
+        {step === 'check_email' && (
+          <form onSubmit={checkEmail} className="space-y-6">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">E-mail Corporativo</label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-3.5 text-slate-400" size={20} />
+                <input
+                  type="email" required autoFocus
+                  className="w-full pl-10 pr-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="seu.email@empresa.com"
+                  value={email} onChange={(e) => setEmail(e.target.value)}
+                  disabled={loading}
+                />
+              </div>
+            </div>
+            <button
+              type="submit" disabled={loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition-all shadow-lg flex items-center justify-center gap-2"
+            >
+              {loading ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full" /> : <>Continuar <ArrowRight size={20} /></>}
+            </button>
+
+            <div className="mt-4 pt-4 border-t border-slate-100 text-center">
+              <button type="button" onClick={() => setStep('new_company')} className="text-sm text-slate-400 hover:text-blue-600 hover:underline">
+                Sou uma nova empresa e quero me cadastrar
+              </button>
+            </div>
+          </form>
+        )}
+
+        {step === 'login_password' && (
+          <form onSubmit={handleLoginPassword} className="space-y-6 animate-in fade-in slide-in-from-right-8">
+            <div className="text-center mb-2">
+              <p className="text-sm text-slate-500">Olá,</p>
+              <p className="font-bold text-slate-800 text-lg">{email}</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">Sua Senha</label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-3.5 text-slate-400" size={20} />
+                <input
+                  type="password" required autoFocus
+                  className="w-full pl-10 pr-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="********"
+                  value={password} onChange={(e) => setPassword(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg transition-all shadow-lg"
+            >
+              Entrar no Sistema
+            </button>
+            <button type="button" onClick={() => { setStep('check_email'); setPassword(''); }} className="w-full text-sm text-slate-500 hover:text-slate-800">
+              Trocar de conta
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // --- UTILITÁRIOS ---
 const formatTime = (date) => {
@@ -176,277 +474,7 @@ const getDateFromTimestamp = (timestamp) => {
 
 // --- COMPONENTES ---
 
-// 1. Tela de Login / Cadastro com SENHA
-const LoginScreen = ({ onLogin }) => {
-  const [step, setStep] = useState('check_email'); // check_email, login_password, register
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [phone, setPhone] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [foundUser, setFoundUser] = useState(null);
 
-  const ADMIN_EMAIL = 'cassiomeiraelis@gmail.com'; // Super admin protegido
-
-  const checkEmail = async (e) => {
-    e.preventDefault();
-    if (!email.trim() || !email.includes('@')) {
-      setError('Por favor, digite um e-mail válido.');
-      return;
-    }
-
-    setLoading(true);
-    setError('');
-
-    try {
-      const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
-      const q = query(usersRef, where('email', '==', email.toLowerCase().trim()));
-      const querySnapshot = await getDocs(q);
-
-      if (!querySnapshot.empty) {
-        const docData = querySnapshot.docs[0];
-        setFoundUser({ id: docData.id, ...docData.data() });
-        setStep('login_password');
-      } else {
-        setStep('register');
-      }
-    } catch (err) {
-      console.error(err);
-      setError(`Erro ao verificar e-mail: ${err.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLoginPassword = (e) => {
-    e.preventDefault();
-    if (!password) {
-      setError('Digite sua senha.');
-      return;
-    }
-
-    if (foundUser && foundUser.password === password) {
-      onLogin(foundUser);
-    } else {
-      setError('Senha incorreta.');
-    }
-  };
-
-  const handleConfirmOvertime = async (justification) => {
-    if (!currentUserData || !currentUserData.id) return;
-
-    try {
-      setLoading(true);
-      // 1. Registra a justificativa na coleção de 'overtime_logs' (nova coleção para auditoria)
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'overtime_logs'), {
-        userId: currentUserData.id,
-        userName: currentUserData.name,
-        timestamp: serverTimestamp(),
-        justification: justification,
-        date: new Date().toISOString().split('T')[0]
-      });
-
-      // 2. Opcional: Atualizar o status do usuário ou adicionar flag no registro de ponto do dia
-      // Por enquanto, apenas logamos.
-
-      alert('Hora extra confirmada e justificada com sucesso!');
-      setShowOvertimeModal(false);
-    } catch (error) {
-      console.error("Erro ao confirmar hora extra:", error);
-      alert("Erro ao salvar justificativa. Tente novamente.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRegister = async (e) => {
-    e.preventDefault();
-    if (!name.trim() || !phone.trim() || !password.trim()) {
-      setError('Preencha todos os campos.');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const isAdmin = email.toLowerCase().trim() === ADMIN_EMAIL;
-      const role = isAdmin ? 'admin' : 'tech';
-
-      // VERIFICAÇÃO DUPLA: Garante que não cria duplicado
-      const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
-      const q = query(usersRef, where('email', '==', email.toLowerCase().trim()));
-      const querySnapshot = await getDocs(q);
-
-      if (!querySnapshot.empty) {
-        setError('Este e-mail já está cadastrado! Volte e faça login.');
-        setLoading(false);
-        return;
-      }
-
-      const newUser = {
-        email: email.toLowerCase().trim(),
-        name: name.trim(),
-        phone: phone.trim(),
-        password: password.trim(),
-        role: role,
-        createdAt: serverTimestamp()
-      };
-
-      const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'users'), newUser);
-      onLogin({ id: docRef.id, ...newUser });
-    } catch (err) {
-      console.error(err);
-      setError('Erro ao realizar cadastro.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-blue-500 to-indigo-600"></div>
-
-        <div className="text-center mb-8 mt-2">
-          <div className="bg-blue-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg shadow-blue-600/30">
-            <Clock className="text-white w-8 h-8" />
-          </div>
-          <h1 className="text-2xl font-bold text-slate-800">ISP Ponto Digital</h1>
-          <p className="text-slate-500">Acesso Seguro</p>
-        </div>
-
-        {error && (
-          <div className="mb-6 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex items-center gap-2 border border-red-100 animate-pulse">
-            <AlertTriangle size={16} />
-            {error}
-          </div>
-        )}
-
-        {step === 'check_email' && (
-          <form onSubmit={checkEmail} className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">E-mail Corporativo</label>
-              <div className="relative">
-                <Mail className="absolute left-3 top-3.5 text-slate-400" size={20} />
-                <input
-                  type="email"
-                  required
-                  className="w-full pl-10 pr-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
-                  placeholder="seu.email@empresa.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  disabled={loading}
-                />
-              </div>
-            </div>
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition-all shadow-lg flex items-center justify-center gap-2"
-            >
-              {loading ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full" /> : <>Continuar <ArrowRight size={20} /></>}
-            </button>
-          </form>
-        )}
-
-        {step === 'login_password' && (
-          <form onSubmit={handleLoginPassword} className="space-y-6 animate-in fade-in slide-in-from-right-8">
-            <div className="text-center mb-2">
-              <p className="text-sm text-slate-500">Bem-vindo de volta,</p>
-              <p className="font-bold text-slate-800 text-lg">{foundUser?.name}</p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Sua Senha</label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-3.5 text-slate-400" size={20} />
-                <input
-                  type="password"
-                  required
-                  autoFocus
-                  className="w-full pl-10 pr-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
-                  placeholder="********"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg transition-all shadow-lg"
-            >
-              Entrar no Sistema
-            </button>
-            <button type="button" onClick={() => { setStep('check_email'); setPassword(''); }} className="w-full text-sm text-slate-500 hover:text-slate-800">
-              Trocar de conta
-            </button>
-          </form>
-        )}
-
-        {step === 'register' && (
-          <form onSubmit={handleRegister} className="space-y-4 animate-in fade-in slide-in-from-right-8">
-            <div className="text-center mb-2">
-              <span className="inline-block px-3 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full mb-2">
-                Primeiro Acesso
-              </span>
-              <p className="text-sm text-slate-600">
-                Defina sua senha para acessar como
-                <strong className="text-slate-800"> {email === ADMIN_EMAIL ? 'Gestor' : 'Técnico'}</strong>.
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1">E-mail</label>
-              <input type="text" value={email} disabled className="w-full px-4 py-2 bg-slate-100 border border-slate-200 rounded-lg text-slate-500 text-sm" />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Nome Completo</label>
-              <input
-                type="text" required
-                className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
-                placeholder="Ex: João Silva"
-                value={name} onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Telefone</label>
-              <input
-                type="tel" required
-                className="w-full px-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
-                placeholder="(00) 00000-0000"
-                value={phone} onChange={(e) => setPhone(e.target.value)}
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Crie uma Senha</label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-2.5 text-slate-400" size={16} />
-                <input
-                  type="password" required
-                  className="w-full pl-9 pr-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
-                  placeholder="Mínimo 6 caracteres"
-                  value={password} onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit" disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition-all shadow-lg mt-4"
-            >
-              {loading ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full" /> : 'Finalizar Cadastro'}
-            </button>
-            <button type="button" onClick={() => setStep('check_email')} className="w-full text-center text-xs text-slate-500 mt-2">Voltar</button>
-          </form>
-        )}
-      </div>
-    </div>
-  );
-};
 
 // --- COMPONENTES AUXILIARES ---
 const OvertimeModal = ({ onClose, onConfirm, onClockOut }) => {
@@ -500,7 +528,8 @@ const OvertimeModal = ({ onClose, onConfirm, onClockOut }) => {
 };
 
 // 2. Visão do Técnico (Mobile First)
-const TechnicianView = ({ user, currentUserData, onLogout }) => {
+const TechnicianView = ({ user, currentUserData, onLogout, companyId }) => {
+  const appId = companyId; // ALIAS para compatibilidade
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('Carregando...');
   const [todayPunches, setTodayPunches] = useState([]);
@@ -1169,11 +1198,64 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
 };
 
 // 3. Dashboard do Gestor (Completo)
-const ManagerDashboard = ({ currentUserData, onLogout }) => {
+const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
+  const appId = companyId; // ALIAS para compatibilidade
   const [punches, setPunches] = useState([]);
   const [allUsers, setAllUsers] = useState([]); // Nova lista de usuários
   const [holidays, setHolidays] = useState([]); // Lista de feriados
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+
+  // Estado para Adicionar Usuário (Novo)
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [newUser, setNewUser] = useState({ name: '', email: '', password: '', phone: '', role: 'tech' });
+  const [isAddingUser, setIsAddingUser] = useState(false);
+
+  const handleAddUser = async () => {
+    if (!newUser.name || !newUser.email || !newUser.password) return alert("Preencha nome, email e senha.");
+    setIsAddingUser(true);
+    try {
+      // 1. Verificar se usuário já existe no Registro Global
+      const globalUserRef = doc(db, 'artifacts', 'global_registry', 'public', 'data', 'users', newUser.email);
+      const globalUserSnap = await getDoc(globalUserRef);
+
+      if (globalUserSnap.exists()) {
+        alert("Este email já está cadastrado no sistema global.");
+        setIsAddingUser(false);
+        return;
+      }
+
+      // 2. Criar usuário na Empresa Local
+      const newLocalUserRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
+
+      await setDoc(newLocalUserRef, {
+        name: newUser.name,
+        email: newUser.email,
+        password: newUser.password, // Em produção, usar hash/auth
+        phone: newUser.phone || '',
+        role: newUser.role,
+        createdAt: serverTimestamp(),
+        active: true,
+        companyId: appId,
+        trackingEnabled: true
+      });
+
+      // 3. Criar registro no Registro Global
+      await setDoc(globalUserRef, {
+        companyId: appId,
+        role: newUser.role,
+        createdAt: serverTimestamp()
+      });
+
+      alert("Usuário criado com sucesso!");
+      setShowAddUserModal(false);
+      setNewUser({ name: '', email: '', password: '', phone: '', role: 'tech' });
+    } catch (error) {
+      console.error("Erro ao criar usuário:", error);
+      alert("Erro ao criar usuário: " + error.message);
+    } finally {
+      setIsAddingUser(false);
+    }
+  };
 
   // Estado para fechamento manual
   const [showCloseModal, setShowCloseModal] = useState(false);
@@ -2269,6 +2351,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
 
       let workedMs = 0;
       let lunchMs = 0;
+      const shiftIntervals = [];
 
       if (atestado || ferias || folga) {
         workedMs = 0;
@@ -2276,30 +2359,52 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       } else if (falta) {
         workedMs = 0;
         lunchMs = 0;
-      } else if (offlineLunch) {
-        lunchMs = 3600000;
-        if (entry && exit) {
-          const totalDuration = exit.timestamp.toDate() - entry.timestamp.toDate();
-          workedMs = totalDuration - lunchMs;
-        } else if (entry) {
-          const now = new Date();
-          const end = exit ? exit.timestamp.toDate() : now;
-          const totalDuration = end - entry.timestamp.toDate();
-          workedMs = Math.max(0, totalDuration - lunchMs);
-        }
       } else {
-        if (lunchOut && lunchBack) {
-          lunchMs = lunchBack.timestamp.toDate() - lunchOut.timestamp.toDate();
+        // Lógica ROBUSTA para Múltiplas Jornadas (Suporte a "Rompimento")
+        // Itera cronologicamente e soma os intervalos de trabalho
+        let currentEntry = null;
+        let currentLunchOut = null;
+
+
+        for (const p of dayPunches) {
+          const pType = p.type;
+          const pTime = p.timestamp ? getDateFromTimestamp(p.timestamp).getTime() : 0;
+
+          if (pType === 'entrada') {
+            // Se já tem entrada aberta, ignora ou reinicia? Assume nova entrada.
+            currentEntry = pTime;
+          } else if (pType === 'saida_almoco') {
+            if (currentEntry) {
+              workedMs += (pTime - currentEntry);
+              shiftIntervals.push({ start: currentEntry, end: pTime });
+              currentEntry = null;
+              currentLunchOut = pTime;
+            }
+          } else if (pType === 'volta_almoco') {
+            if (currentLunchOut) {
+              lunchMs += (pTime - currentLunchOut);
+              currentLunchOut = null;
+            }
+            currentEntry = pTime;
+          } else if (pType === 'saida') {
+            if (currentEntry) {
+              workedMs += (pTime - currentEntry);
+              shiftIntervals.push({ start: currentEntry, end: pTime });
+              currentEntry = null;
+            }
+          } else if (pType === 'lunch_offline') {
+            lunchMs += 3600000;
+            // Ajuste simples para offline lunch
+            workedMs -= 3600000;
+          }
         }
 
-        if (entry && lunchOut && lunchBack && exit) {
-          workedMs = (lunchOut.timestamp.toDate() - entry.timestamp.toDate()) + (exit.timestamp.toDate() - lunchBack.timestamp.toDate());
-        } else if (entry && lunchOut && lunchBack) {
-          workedMs = (lunchOut.timestamp.toDate() - entry.timestamp.toDate()) + (new Date() - lunchBack.timestamp.toDate());
-        } else if (entry && lunchOut) {
-          workedMs = lunchOut.timestamp.toDate() - entry.timestamp.toDate();
-        } else if (entry) {
-          workedMs = new Date() - entry.timestamp.toDate();
+        // Se o dia ainda não acabou
+        const isToday = currentDayDate.toDateString() === new Date().toDateString();
+        if (currentEntry && isToday) {
+          const now = Date.now();
+          workedMs += (now - currentEntry);
+          shiftIntervals.push({ start: currentEntry, end: now, active: true });
         }
       }
 
@@ -2324,6 +2429,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         lunchMs,
         expectedMs,
         balanceMs,
+        shiftIntervals,
         hasPunches: dayPunches.length > 0,
         punches: dayPunches
       });
@@ -2343,7 +2449,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       <nav className="bg-white border-b border-slate-200 px-4 md:px-8 py-4 flex flex-col md:flex-row justify-between items-center shadow-sm gap-4">
         <div className="flex items-center gap-3 w-full md:w-auto">
           <img src="/logo.jpg" alt="Netcar Logo" className="h-10 w-10 rounded-lg object-cover" />
-          <div><h1 className="font-bold text-lg md:text-xl text-slate-800">Netcar Telecom - Gestão</h1><p className="text-xs text-slate-500">Controle de Frota e Ponto</p></div>
+          <div><h1 className="font-bold text-lg md:text-xl text-slate-800">{currentUserData?.companyName || 'Painel Gestor'}</h1><p className="text-xs text-slate-500">Controle de Frota e Ponto</p></div>
         </div>
         <div className="flex items-center justify-between w-full md:w-auto gap-4">
           <div className="text-right"><p className="text-sm font-bold text-slate-700">{currentUserData.name}</p><p className="text-xs text-slate-500">{currentUserData.email}</p></div>
@@ -2762,7 +2868,16 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                             const isFolga = stat.punches.some(p => p.type === 'folga');
                             const isFalta = stat.punches.some(p => p.type === 'falta');
 
+                            // Formata Entrada (Se houver múltiplos turnos/rompimento, exibe aqui)
                             let entry = stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-';
+                            if (stat.shiftIntervals && stat.shiftIntervals.length > 1) {
+                              // Pega os turnos extras (a partir do segundo)
+                              const extras = stat.shiftIntervals.slice(1);
+                              extras.forEach(ex => {
+                                entry += `\n+ ${formatTime(new Date(ex.start))} às ${formatTime(new Date(ex.end))}`;
+                              });
+                            }
+
                             let lunchOut = stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-';
                             let lunchBack = stat.lunchBack ? formatTime(getDateFromTimestamp(stat.lunchBack.timestamp)) : '-';
                             let exit = stat.exit ? formatTime(getDateFromTimestamp(stat.exit.timestamp)) : '-';
@@ -3024,7 +3139,18 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                                         stat.dayOfWeek === 'saturday' ? 'Sáb' : 'Dom'}
                             </td>
                             <td className="px-4 py-3 text-center">
-                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : isFalta ? <span className="text-xs font-bold text-orange-600">Falta</span> : (stat.entry ? formatTime(getDateFromTimestamp(stat.entry.timestamp)) : '-')}
+                              {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : isFalta ? <span className="text-xs font-bold text-orange-600">Falta</span> : (
+                                stat.entry ? (
+                                  <div className="flex flex-col items-center">
+                                    <span>{formatTime(getDateFromTimestamp(stat.entry.timestamp))}</span>
+                                    {stat.shiftIntervals && stat.shiftIntervals.length > 1 && stat.shiftIntervals.slice(1).map((ex, i) => (
+                                      <span key={i} className="text-[10px] text-purple-600 font-bold whitespace-nowrap" title="Rompimento / Nova Jornada">
+                                        + {formatTime(new Date(ex.start))} - {ex.end ? formatTime(new Date(ex.end)) : '...'}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : '-'
+                              )}
                             </td>
                             <td className="px-4 py-3 text-center">
                               {isAtestado ? <span className="text-xs font-bold text-blue-600">Atestado</span> : isFerias ? <span className="text-xs font-bold text-purple-600">Férias</span> : isFolga ? <span className="text-xs font-bold text-teal-600">Folga</span> : isFalta ? <span className="text-xs font-bold text-orange-600">Falta</span> : (stat.offlineLunch ? <span className="text-xs text-slate-400">Offline</span> : (stat.lunchOut ? formatTime(getDateFromTimestamp(stat.lunchOut.timestamp)) : '-'))}
@@ -3415,6 +3541,12 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
               <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
                 <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users size={20} className="text-indigo-600" /> Gestão de Usuários</h3>
                 <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600">Total: {allUsers.length}</span>
+                <button
+                  onClick={() => setShowAddUserModal(true)}
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200"
+                >
+                  <UserPlus size={18} /> Novo Usuário
+                </button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -4071,6 +4203,100 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
             </div>
           )
         }
+        {/* MODAL NOVO USUÁRIO */}
+        {
+          showAddUserModal && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[2000] p-4 backdrop-blur-sm">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 p-6 flex justify-between items-center text-white">
+                  <div>
+                    <h3 className="font-bold text-xl flex items-center gap-2"><UserPlus size={24} /> Novo Usuário</h3>
+                    <p className="text-indigo-100 text-sm mt-1">Cadastrar novo membro na equipe</p>
+                  </div>
+                  <button onClick={() => setShowAddUserModal(false)} className="hover:bg-white/20 p-2 rounded-lg transition-colors"><X size={24} /></button>
+                </div>
+
+                <div className="p-8 space-y-5">
+                  <div className="grid grid-cols-2 gap-5">
+                    <div className="col-span-2">
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Nome Completo</label>
+                      <div className="relative">
+                        <User size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          value={newUser.name}
+                          onChange={(e) => setNewUser({ ...newUser, name: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                          placeholder="Ex: João da Silva"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-sm font-bold text-slate-700 mb-2">E-mail (Login)</label>
+                      <div className="relative">
+                        <Mail size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="email"
+                          value={newUser.email}
+                          onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                          placeholder="joao@empresa.com"
+                        />
+                      </div>
+                      <p className="text-xs text-orange-600 mt-1 font-medium">Este email será usado para identificar a empresa no login.</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Senha Inicial</label>
+                      <div className="relative">
+                        <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          value={newUser.password}
+                          onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                          placeholder="******"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Função</label>
+                      <div className="relative">
+                        <Shield size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <select
+                          value={newUser.role}
+                          onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-white transition-all appearance-none"
+                        >
+                          <option value="tech">Técnico</option>
+                          <option value="admin">Administrador</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex gap-3">
+                    <button
+                      onClick={() => setShowAddUserModal(false)}
+                      className="flex-1 py-3 bg-slate-100 text-slate-700 font-bold rounded-xl hover:bg-slate-200 transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={handleAddUser}
+                      disabled={isAddingUser}
+                      className="flex-1 py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-xl shadow-indigo-600/20 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-70 disabled:cursor-not-allowed"
+                    >
+                      {isAddingUser ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full" /> : <><Check size={20} /> Criar Usuário</>}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        }
       </main >
     </div >
   );
@@ -4081,13 +4307,35 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [currentUserData, setCurrentUserData] = useState(null);
   const [authInitialized, setAuthInitialized] = useState(false);
+  const [companyId, setCompanyId] = useState(null); // MULTI-TENANCY
+
+  // Recupera empresa salva
+  useEffect(() => {
+    const savedCompany = localStorage.getItem('ponto_app_company_id');
+    if (savedCompany) setCompanyId(savedCompany);
+  }, []);
+
+  const handleCompanySelect = (id) => {
+    localStorage.setItem('ponto_app_company_id', id);
+    setCompanyId(id);
+    // Limpa usuário anterior pois mudou de empresa
+    localStorage.removeItem('ponto_app_user_id');
+    setCurrentUserData(null);
+    setUser(null);
+  };
 
   useEffect(() => {
+    // NOTA: Removemos o bloqueio "if (!companyId) return" para permitir que a autenticação anônima
+    // aconteça mesmo na tela de login, o que é necessário para consultar o Global Registry.
+
+    const appId = companyId; // Contexto local para este effect
+
     const initAuth = async () => {
       // 1. Tenta recuperar sessão persistente do localStorage
       const savedUserId = localStorage.getItem('ponto_app_user_id');
 
-      if (savedUserId) {
+      // Só tentamos carregar o usuário se tivermos empresa E usuário salvo
+      if (appId && savedUserId) {
         try {
           const userDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', savedUserId));
           if (userDoc.exists()) {
@@ -4101,6 +4349,7 @@ export default function App() {
       }
 
       // 2. Inicializa Auth do Firebase (para anônimo/custom token)
+      // Isso DEVE rodar sempre para permitir leitura do Firestore (Global Registry)
       if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
         try { await signInWithCustomToken(auth, __initial_auth_token); }
         catch (e) { await signInAnonymously(auth); }
@@ -4114,12 +4363,15 @@ export default function App() {
       setAuthInitialized(true);
     });
     return () => unsubscribe();
-  }, []);
+  }, [companyId]); // Depende do companyId
 
   const [notificationsBlocked, setNotificationsBlocked] = useState(false);
 
   // --- NOTIFICAÇÕES (FCM) ---
   useEffect(() => {
+    if (!companyId) return; // Proteção
+    const appId = companyId;
+
     const setupNotifications = async () => {
       if (!user || !currentUserData) return;
 
@@ -4216,11 +4468,12 @@ export default function App() {
     };
 
     setupNotifications();
-  }, [user, currentUserData]);
+  }, [user, currentUserData, companyId]);
 
   const handleLogin = async (data) => {
     setCurrentUserData(data);
     localStorage.setItem('ponto_app_user_id', data.id);
+    const appId = companyId; // Contexto local
 
     // --- DEVICE LOCKING: Bind device on Login ---
     if (Capacitor.isNativePlatform()) {
@@ -4255,9 +4508,12 @@ export default function App() {
     localStorage.removeItem('ponto_app_user_id');
   };
 
+  // 1. Aguarda inicialização da Autenticação (Anônima ou Usuário)
+  // Isso garante que tenhamos um token antes de tentar qualquer leitura no Firestore (como o checkEmail)
   if (!authInitialized) return <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white"><div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full"></div></div>;
 
-  if (!currentUserData) return <LoginScreen onLogin={handleLogin} />;
+  // 2. Se não tem usuário logado...
+  if (!currentUserData) return <LoginScreen onLogin={handleLogin} setGlobalCompanyId={handleCompanySelect} />;
 
   // TELA DE BLOQUEIO DE NOTIFICAÇÕES
   if (notificationsBlocked && currentUserData.role !== 'admin') {
@@ -4300,6 +4556,6 @@ export default function App() {
     );
   }
 
-  if (currentUserData.role === 'admin') return <ManagerDashboard user={user} currentUserData={currentUserData} onLogout={handleLogout} />;
-  return <TechnicianView user={user} currentUserData={currentUserData} onLogout={handleLogout} />;
+  if (currentUserData.role === 'admin') return <ManagerDashboard user={user} currentUserData={currentUserData} onLogout={handleLogout} companyId={companyId} />;
+  return <TechnicianView user={user} currentUserData={currentUserData} onLogout={handleLogout} companyId={companyId} />;
 }
