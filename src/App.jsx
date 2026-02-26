@@ -1963,16 +1963,35 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
   // Adicionar Feriado Manual
   const [newHolidayDate, setNewHolidayDate] = useState('');
   const [newHolidayName, setNewHolidayName] = useState('');
+  const [newHolidayCities, setNewHolidayCities] = useState([]); // Array de cidades para o novo feriado
+
+  // Cidades únicas extraídas dos usuários
+  const availableCities = useMemo(() => {
+    const cities = allUsers
+      .map(u => u.city)
+      .filter(city => city && city.trim() !== '');
+    return [...new Set(cities)]; // Remove duplicadas
+  }, [allUsers]);
+
+  const toggleHolidayCity = (city) => {
+    if (newHolidayCities.includes(city)) {
+      setNewHolidayCities(newHolidayCities.filter(c => c !== city));
+    } else {
+      setNewHolidayCities([...newHolidayCities, city]);
+    }
+  };
 
   const addHoliday = async () => {
     if (!newHolidayDate || !newHolidayName) return alert("Preencha data e nome.");
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'), {
         date: newHolidayDate,
-        name: newHolidayName
+        name: newHolidayName,
+        cities: newHolidayCities // Array vazio = Global
       });
       setNewHolidayDate('');
       setNewHolidayName('');
+      setNewHolidayCities([]);
     } catch (error) {
       alert("Erro ao adicionar feriado.");
     }
@@ -2311,9 +2330,19 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
 
   // Função auxiliar para obter horas esperadas
   const getExpectedWorkHours = (dayOfWeek, user, date) => {
-    // Verifica se é feriado
+    // Verifica se é feriado (Lógica Por Cidade)
     const dateStr = date.toISOString().split('T')[0];
-    const isHoliday = holidays.some(h => h.date === dateStr);
+    const isHoliday = holidays.some(h => {
+      // Data deve bater
+      if (h.date !== dateStr) return false;
+      // Se não tem cidades definidas ou array vazio, é global
+      if (!h.cities || h.cities.length === 0) return true;
+      // Se o usuário não tem cidade, feriados específicos não se aplicam a ele (apenas globais)
+      if (!user || (!user.city && !user.cidade)) return false;
+
+      const userCity = (user.city || user.cidade).toLowerCase().trim();
+      return h.cities.some(city => city.toLowerCase().trim() === userCity);
+    });
     if (isHoliday) return 0;
 
     // Se for ferias, a expectativa é 0 (será tratado no dailyStats, mas aqui ajuda se precisarmos)
@@ -3297,32 +3326,66 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
                 </button>
               </div>
 
-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex gap-4 items-end">
-                <div className="flex-1">
-                  <label className="block text-xs font-bold text-slate-500 mb-1">Data</label>
-                  <input
-                    type="date"
-                    value={newHolidayDate}
-                    onChange={(e) => setNewHolidayDate(e.target.value)}
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  />
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex flex-col gap-4">
+                <div className="flex gap-4 items-end">
+                  <div className="flex-1">
+                    <label className="block text-xs font-bold text-slate-500 mb-1">Data</label>
+                    <input
+                      type="date"
+                      value={newHolidayDate}
+                      onChange={(e) => setNewHolidayDate(e.target.value)}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex-[2]">
+                    <label className="block text-xs font-bold text-slate-500 mb-1">Nome do Feriado</label>
+                    <input
+                      type="text"
+                      value={newHolidayName}
+                      onChange={(e) => setNewHolidayName(e.target.value)}
+                      placeholder="Ex: Aniversário da Cidade"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <button
+                    onClick={addHoliday}
+                    className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold text-sm transition-colors h-[38px]"
+                  >
+                    Adicionar
+                  </button>
                 </div>
-                <div className="flex-[2]">
-                  <label className="block text-xs font-bold text-slate-500 mb-1">Nome do Feriado</label>
-                  <input
-                    type="text"
-                    value={newHolidayName}
-                    onChange={(e) => setNewHolidayName(e.target.value)}
-                    placeholder="Ex: Aniversário da Cidade"
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  />
-                </div>
-                <button
-                  onClick={addHoliday}
-                  className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold text-sm transition-colors h-[38px]"
-                >
-                  Adicionar
-                </button>
+
+                {/* Seletor de Cidades para o Feriado */}
+                {availableCities.length > 0 && (
+                  <div className="bg-white border border-slate-200 p-3 rounded-lg">
+                    <p className="block text-xs font-bold text-slate-600 mb-2">Aplicar em quais cidades?</p>
+                    <div className="flex flex-wrap gap-3">
+                      <label className="flex items-center gap-2 cursor-pointer text-sm">
+                        <input
+                          type="checkbox"
+                          checked={newHolidayCities.length === 0}
+                          onChange={() => setNewHolidayCities([])}
+                          className="w-4 h-4 text-indigo-600 rounded"
+                        />
+                        <span className="font-bold text-indigo-700">Todas (Global)</span>
+                      </label>
+                      {availableCities.map(city => (
+                        <label key={city} className="flex items-center gap-2 cursor-pointer text-sm">
+                          <input
+                            type="checkbox"
+                            checked={newHolidayCities.includes(city)}
+                            onChange={() => toggleHolidayCity(city)}
+                            className="w-4 h-4 text-slate-600 rounded"
+                          />
+                          <span className="text-slate-700">{city}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {newHolidayCities.length === 0 && (
+                      <p className="text-[10px] text-slate-400 mt-1">Nenhuma cidade específica marcada. Este feriado valerá para todos os técnicos.</p>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="overflow-x-auto">
@@ -3331,6 +3394,7 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
                     <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
                       <th className="px-4 py-3 font-semibold">Data</th>
                       <th className="px-4 py-3 font-semibold">Nome</th>
+                      <th className="px-4 py-3 font-semibold">Cidades (Escopo)</th>
                       <th className="px-4 py-3 font-semibold text-right">Ações</th>
                     </tr>
                   </thead>
@@ -3339,6 +3403,17 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
                       <tr key={h.id} className="hover:bg-slate-50">
                         <td className="px-4 py-3 font-mono">{formatDate(new Date(h.date + 'T12:00:00'))}</td>
                         <td className="px-4 py-3 font-bold">{h.name}</td>
+                        <td className="px-4 py-3">
+                          {h.cities && h.cities.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {h.cities.map(c => (
+                                <span key={c} className="bg-slate-100 border border-slate-200 text-slate-600 text-[10px] px-2 py-0.5 rounded-full">{c}</span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs font-bold text-indigo-600">Global (Todas)</span>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-right">
                           <button onClick={() => deleteHoliday(h.id)} className="text-red-500 hover:text-red-700 p-1">
                             <Trash2 size={18} />
