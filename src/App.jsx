@@ -1533,10 +1533,14 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
   const [editingPunches, setEditingPunches] = useState([]);
   const [editingUser, setEditingUser] = useState(null);
   const [editingDate, setEditingDate] = useState(null);
+  const [dayObservation, setDayObservation] = useState(''); // Estado para a observação do dia
+  const [isLoadingObservation, setIsLoadingObservation] = useState(false); // Estado de loading para a observação
 
-  const openEditPunchModal = (user, dateStr, dailyPunches) => {
+  const openEditPunchModal = async (user, dateStr, dailyPunches) => {
     setEditingUser(user);
     setEditingDate(dateStr);
+    setDayObservation(''); // Limpa observação anterior
+    setIsLoadingObservation(true);
 
     // Prepara os dados para edição
     // Se não houver punches, inicia vazio
@@ -1549,6 +1553,25 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
 
     setEditingPunches(formattedPunches);
     setShowEditPunchModal(true);
+
+    // Busca a observação do dia no Firebase
+    if (user && user.email && dateStr) {
+      try {
+        const obsId = `${user.email}_${dateStr}`;
+        const obsRef = doc(db, 'artifacts', appId, 'public', 'data', 'daily_observations', obsId);
+        const obsSnap = await getDoc(obsRef);
+
+        if (obsSnap.exists()) {
+          setDayObservation(obsSnap.data().text || '');
+        }
+      } catch (error) {
+        console.error("Erro ao carregar observação do dia:", error);
+      } finally {
+        setIsLoadingObservation(false);
+      }
+    } else {
+      setIsLoadingObservation(false);
+    }
   };
 
   const handleAddPunchRow = () => {
@@ -1624,8 +1647,25 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
         });
       });
 
+      // 3. Salvar a Observação do Dia
+      const obsId = `${editingUser.email}_${editingDate}`;
+      const obsRef = doc(db, 'artifacts', appId, 'public', 'data', 'daily_observations', obsId);
+
+      if (dayObservation.trim()) {
+        batch.set(obsRef, {
+          userEmail: editingUser.email,
+          date: editingDate,
+          text: dayObservation.trim(),
+          updatedAt: serverTimestamp(),
+          updatedBy: currentUserData?.email || 'admin'
+        }, { merge: true });
+      } else {
+        // Se estiver vazio, tenta deletar para não acumular lixo
+        batch.delete(obsRef);
+      }
+
       await batch.commit();
-      alert("Registros atualizados com sucesso!");
+      alert("Registros e observação atualizados com sucesso!");
       setShowEditPunchModal(false);
     } catch (error) {
       console.error("Erro ao salvar edições:", error);
@@ -2376,7 +2416,7 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
           } else if (pType === 'saida_almoco') {
             if (currentEntry) {
               workedMs += (pTime - currentEntry);
-              shiftIntervals.push({ start: currentEntry, end: pTime });
+              shiftIntervals.push({ start: currentEntry, end: pTime, isPrimaryFirstHalf: true });
               currentEntry = null;
               currentLunchOut = pTime;
             }
@@ -2389,7 +2429,8 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
           } else if (pType === 'saida') {
             if (currentEntry) {
               workedMs += (pTime - currentEntry);
-              shiftIntervals.push({ start: currentEntry, end: pTime });
+              // Verifica se foi uma jornada simples ou contínua para não marcar como "extra" no visual
+              shiftIntervals.push({ start: currentEntry, end: pTime, isPrimarySecondHalf: true });
               currentEntry = null;
             }
           } else if (pType === 'lunch_offline') {
@@ -2404,7 +2445,7 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
         if (currentEntry && isToday) {
           const now = Date.now();
           workedMs += (now - currentEntry);
-          shiftIntervals.push({ start: currentEntry, end: now, active: true });
+          shiftIntervals.push({ start: currentEntry, end: now, active: true, isPrimarySecondHalf: true });
         }
       }
 
@@ -3143,7 +3184,7 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
                                 stat.entry ? (
                                   <div className="flex flex-col items-center">
                                     <span>{formatTime(getDateFromTimestamp(stat.entry.timestamp))}</span>
-                                    {stat.shiftIntervals && stat.shiftIntervals.length > 1 && stat.shiftIntervals.slice(1).map((ex, i) => (
+                                    {stat.shiftIntervals && stat.shiftIntervals.length > 2 && stat.shiftIntervals.filter(ex => !ex.isPrimaryFirstHalf && !ex.isPrimarySecondHalf).map((ex, i) => (
                                       <span key={i} className="text-[10px] text-purple-600 font-bold whitespace-nowrap" title="Rompimento / Nova Jornada">
                                         + {formatTime(new Date(ex.start))} - {ex.end ? formatTime(new Date(ex.end)) : '...'}
                                       </span>
@@ -3948,6 +3989,26 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
                           </button>
                         </div>
                       </div>
+                    )}
+                  </div>
+
+                  {/* SEÇÃO DE OBSERVAÇÃO DO DIA */}
+                  <div className="mb-6 border-t border-slate-100 pt-4">
+                    <h4 className="font-bold text-slate-700 mb-2 text-sm flex items-center gap-2">
+                      <FileText size={16} /> Observação do Dia (Apenas Gestor)
+                    </h4>
+                    {isLoadingObservation ? (
+                      <div className="flex items-center justify-center p-4">
+                        <span className="animate-spin h-5 w-5 border-2 border-indigo-500 border-t-transparent rounded-full" />
+                      </div>
+                    ) : (
+                      <textarea
+                        value={dayObservation}
+                        onChange={(e) => setDayObservation(e.target.value)}
+                        placeholder="Ex: Dei folga para o técnico hoje por motivo X..."
+                        rows={3}
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
+                      />
                     )}
                   </div>
 
