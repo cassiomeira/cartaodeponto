@@ -101,6 +101,11 @@ async function runScheduleCheck() {
 
     let notificationsSent = 0;
 
+    const todayStart = new Date(localNow);
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(localNow);
+    todayEnd.setHours(23, 59, 59, 999);
+
     for (const user of users) {
         if (!user.workSchedule || !user.workSchedule[dayOfWeek] || !user.workSchedule[dayOfWeek].active) {
             continue;
@@ -113,43 +118,32 @@ async function runScheduleCheck() {
         const startTotalMinutes = startH * 60 + startM;
         const endTotalMinutes = endH * 60 + endM;
 
-        // --- 0. VERIFICAÇÃO DE STATUS ESPECIAIS (Atestado, Férias, Folga) ---
-        // Se o técnico está dispensado hoje, não deve receber notificações de atraso nem de hora extra.
-        const specialSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
+        // Uma única query por técnico: todos os punches de hoje
+        const todayPunchesSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
             .where('userEmail', '==', user.email)
-            .where('type', 'in', ['atestado', 'ferias', 'folga'])
+            .where('timestamp', '>=', todayStart)
+            .where('timestamp', '<=', todayEnd)
             .get();
 
-        let hasSpecialStatus = false;
-        specialSnapshot.forEach(doc => {
-            const pData = doc.data();
-            const pDate = pData.timestamp.toDate();
-            if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth()) {
-                hasSpecialStatus = true;
-            }
+        const todayTypes = new Set();
+        todayPunchesSnapshot.forEach(doc => {
+            todayTypes.add(doc.data().type);
         });
+
+        // --- 0. VERIFICAÇÃO DE STATUS ESPECIAIS (Atestado, Férias, Folga) ---
+        const hasSpecialStatus = todayTypes.has('atestado') || todayTypes.has('ferias') || todayTypes.has('folga');
 
         if (hasSpecialStatus) {
             console.log(`Usuário ${user.name} possui status especial hoje (Atestado/Férias/Folga). Pulando verificações.`);
             continue;
         }
 
+        const hasEntry = todayTypes.has('entrada');
+        const hasExit = todayTypes.has('saida');
+        const hasJustification = todayTypes.has('justificativa_hora_extra');
+
         // --- VERIFICAÇÃO DE ATRASO (Entrada) ---
         if (currentTotalMinutes > (startTotalMinutes + 10) && currentTotalMinutes < (startTotalMinutes + delayWindow)) {
-            const punchesSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
-                .where('userEmail', '==', user.email)
-                .where('type', '==', 'entrada')
-                .get();
-
-            let hasEntry = false;
-            punchesSnapshot.forEach(doc => {
-                const pData = doc.data();
-                const pDate = pData.timestamp.toDate();
-                if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth()) {
-                    hasEntry = true;
-                }
-            });
-
             if (!hasEntry) {
                 console.log(`Usuário ${user.name} atrasado! Enviando alerta.`);
 
@@ -180,62 +174,14 @@ async function runScheduleCheck() {
 
         // --- VERIFICAÇÃO DE SAÍDA (Hora Extra) ---
         if (currentTotalMinutes >= endTotalMinutes && currentTotalMinutes < (endTotalMinutes + overtimeWindow)) {
-
-            // 0. Verifica se o usuário de fato entrou hoje
-            // (Só cobra hora extra se iniciou a jornada)
-            const entrySnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
-                .where('userEmail', '==', user.email)
-                .where('type', '==', 'entrada')
-                .get();
-
-            let hasEntry = false;
-            entrySnapshot.forEach(doc => {
-                const pData = doc.data();
-                const pDate = pData.timestamp.toDate();
-                if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth()) {
-                    hasEntry = true;
-                }
-            });
-
             if (!hasEntry) {
-                // Se não entrou, não cobra saída/hora extra (provavelmente faltou ou esqueceu entrada - nesse caso o alerta de atraso já foi).
                 continue;
             }
 
-            // 1. Verifica se já saiu
-            const exitSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
-                .where('userEmail', '==', user.email)
-                .where('type', '==', 'saida')
-                .get();
-
-            let hasExit = false;
-            exitSnapshot.forEach(doc => {
-                const pData = doc.data();
-                const pDate = pData.timestamp.toDate();
-                if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth()) {
-                    hasExit = true;
-                }
-            });
-
             if (!hasExit) {
-                // 2. Verifica se já justificou a hora extra hoje
-                const justifSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
-                    .where('userEmail', '==', user.email)
-                    .where('type', '==', 'justificativa_hora_extra')
-                    .get();
-
-                let hasJustification = false;
-                justifSnapshot.forEach(doc => {
-                    const pData = doc.data();
-                    const pDate = pData.timestamp.toDate();
-                    if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth()) {
-                        hasJustification = true;
-                    }
-                });
-
                 if (hasJustification) {
                     console.log(`Usuário ${user.name} em hora extra, mas já justificado.`);
-                    continue; // Pula notificações
+                    continue;
                 }
 
                 console.log(`Usuário ${user.name} passou do horário. Enviando alerta de Hora Extra.`);
@@ -344,12 +290,18 @@ async function runAutoLunchCheck() {
         const limitTotalMinutes = limH * 60 + limM;
 
         if (currentTotalMinutes > limitTotalMinutes) {
-            // Verificar Punches de Hoje
+            // Verificar Punches de Hoje (filtrado por data no Firestore)
+            const dayStart = new Date(localNow);
+            dayStart.setHours(0, 0, 0, 0);
+            const dayEnd = new Date(localNow);
+            dayEnd.setHours(23, 59, 59, 999);
+
             const punchesSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
                 .where('userEmail', '==', user.email)
+                .where('timestamp', '>=', dayStart)
+                .where('timestamp', '<=', dayEnd)
                 .get();
 
-            // Filtra em memória para o dia de hoje (limitação do Firestore para query com range + filtro)
             const todayPunches = [];
             let hasEntry = false;
             let hasExit = false;
@@ -357,13 +309,10 @@ async function runAutoLunchCheck() {
 
             punchesSnapshot.forEach(pDoc => {
                 const pData = pDoc.data();
-                const pDate = pData.timestamp.toDate();
-                if (pDate.getDate() === localNow.getDate() && pDate.getMonth() === localNow.getMonth() && pDate.getFullYear() === localNow.getFullYear()) {
-                    todayPunches.push({ id: pDoc.id, ...pData });
-                    if (pData.type === 'entrada') hasEntry = true;
-                    if (pData.type === 'saida') hasExit = true;
-                    if (pData.type === 'saida_almoco' || pData.type === 'lunch_offline' || pData.type === 'auto_lunch') hasLunch = true;
-                }
+                todayPunches.push({ id: pDoc.id, ...pData });
+                if (pData.type === 'entrada') hasEntry = true;
+                if (pData.type === 'saida') hasExit = true;
+                if (pData.type === 'saida_almoco' || pData.type === 'lunch_offline' || pData.type === 'auto_lunch') hasLunch = true;
             });
 
             // Lógica:
