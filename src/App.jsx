@@ -23,7 +23,8 @@ import {
   writeBatch,
 
   getDoc,
-  arrayUnion
+  arrayUnion,
+  Timestamp
 } from 'firebase/firestore';
 import { getMessaging, getToken, onMessage } from 'firebase/messaging';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -663,18 +664,21 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
   useEffect(() => {
     if (!currentUserData) return;
 
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
     const q = query(
       collection(db, 'artifacts', appId, 'public', 'data', 'punches'),
+      where('userEmail', '==', currentUserData.email),
+      where('timestamp', '>=', todayStart),
+      where('timestamp', '<=', todayEnd),
       orderBy('timestamp', 'asc')
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const allPunches = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      const today = new Date().toDateString();
-      const myPunchesToday = allPunches.filter(p => {
-        const pDate = getDateFromTimestamp(p.timestamp);
-        return (p.userEmail === currentUserData.email) && pDate && pDate.toDateString() === today;
-      }).map(p => {
+      const myPunchesToday = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).map(p => {
         // Verifica Geofencing
         let isOutOfRange = false;
         let distance = 0;
@@ -1765,10 +1769,16 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     return () => unsubscribe();
   }, []);
 
-  // Buscar Pontos
+  // Buscar Pontos (filtrado pelo mês do relatório)
   useEffect(() => {
+    const [year, month] = reportMonth.split('-').map(Number);
+    const monthStart = new Date(year, month - 1, 1);
+    const monthEnd = new Date(year, month, 0, 23, 59, 59, 999);
+
     const q = query(
       collection(db, 'artifacts', appId, 'public', 'data', 'punches'),
+      where('timestamp', '>=', monthStart),
+      where('timestamp', '<=', monthEnd),
       orderBy('timestamp', 'desc')
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -1776,7 +1786,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       setPunches(data);
     }, (error) => console.error(error));
     return () => unsubscribe();
-  }, []);
+  }, [reportMonth]);
 
   // Buscar Feriados
   useEffect(() => {
