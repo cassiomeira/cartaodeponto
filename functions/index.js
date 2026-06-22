@@ -6,21 +6,37 @@ const { HttpsError } = require("firebase-functions/v2/https");
 admin.initializeApp();
 
 const db = admin.firestore();
-const APP_ID = "cartao-de-ponto-5e801"; // ID fixo do app
+const LEGACY_APP_ID = "cartao-de-ponto-5e801";
+
+// --- DESCOBRIR TODAS AS EMPRESAS ---
+async function getAllCompanyIds() {
+    const companyIds = new Set();
+    companyIds.add(LEGACY_APP_ID);
+
+    const registrySnapshot = await db.collection('artifacts').doc('global_registry')
+        .collection('public').doc('data').collection('users').get();
+
+    registrySnapshot.forEach(doc => {
+        const data = doc.data();
+        if (data.companyId) companyIds.add(data.companyId);
+    });
+
+    return [...companyIds];
+}
 
 // --- ENVIO MANUAL (v2) ---
 exports.sendManualNotification = onCall({ cors: true }, async (request) => {
-    const { userIds, title, body } = request.data;
+    const { userIds, title, body, companyId } = request.data;
 
     if (!userIds || !title || !body) {
         throw new HttpsError('invalid-argument', 'Faltam dados (userIds, title, body).');
     }
 
+    const appId = companyId || LEGACY_APP_ID;
     const tokens = [];
 
-    // Busca tokens dos usuários selecionados
     for (const uid of userIds) {
-        const userDoc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('users').doc(uid).get();
+        const userDoc = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('users').doc(uid).get();
         if (userDoc.exists) {
             const userData = userDoc.data();
             if (userData.fcmTokens && Array.isArray(userData.fcmTokens)) {
@@ -47,8 +63,8 @@ exports.sendManualNotification = onCall({ cors: true }, async (request) => {
     }
 });
 
-// --- LÓGICA COMPARTILHADA DE VERIFICAÇÃO ---
-async function runScheduleCheck() {
+// --- LÓGICA COMPARTILHADA DE VERIFICAÇÃO (POR EMPRESA) ---
+async function runScheduleCheckForCompany(appId) {
     const now = new Date();
     const localNow = new Date(now.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     const currentHour = localNow.getHours();
@@ -56,23 +72,17 @@ async function runScheduleCheck() {
     const currentTotalMinutes = currentHour * 60 + currentMinute;
 
     const dayOfWeek = localNow.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-    const year = localNow.getFullYear();
-    const month = String(localNow.getMonth() + 1).padStart(2, '0');
-    const day = String(localNow.getDate()).padStart(2, '0');
-    const todayDateStr = `${year}-${month}-${day}`;
 
-    console.log(`Verificando escalas para: ${todayDateStr} (${dayOfWeek}) às ${currentHour}:${currentMinute}`);
-
-    // 1. Buscar Técnicos
-    const usersSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('users')
+    const usersSnapshot = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('users')
         .where('role', '==', 'tech')
         .get();
 
     const users = [];
     usersSnapshot.forEach(doc => users.push({ id: doc.id, ...doc.data() }));
 
-    // 2. Buscar Admins (para alertas)
-    const adminsSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('users')
+    if (users.length === 0) return 0;
+
+    const adminsSnapshot = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('users')
         .where('role', '==', 'admin')
         .get();
 
@@ -83,21 +93,18 @@ async function runScheduleCheck() {
     });
     const uniqueAdminTokens = [...new Set(adminTokens)];
 
-    // 3. Buscar Configurações
-    let delayWindow = 60; // Default
-    let overtimeWindow = 120; // Default
+    let delayWindow = 60;
+    let overtimeWindow = 120;
     try {
-        const settingsDoc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('notifications').get();
+        const settingsDoc = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('settings').doc('notifications').get();
         if (settingsDoc.exists) {
             const sData = settingsDoc.data();
             if (sData.delayWindow) delayWindow = Number(sData.delayWindow);
             if (sData.overtimeWindow) overtimeWindow = Number(sData.overtimeWindow);
         }
     } catch (e) {
-        console.log("Erro ao buscar settings, usando defaults:", e);
+        console.log(`[${appId}] Erro ao buscar settings, usando defaults:`, e);
     }
-
-    console.log(`Usando janelas: Atraso=${delayWindow}min, HoraExtra=${overtimeWindow}min`);
 
     let notificationsSent = 0;
 
@@ -118,8 +125,7 @@ async function runScheduleCheck() {
         const startTotalMinutes = startH * 60 + startM;
         const endTotalMinutes = endH * 60 + endM;
 
-        // Uma única query por técnico: todos os punches de hoje
-        const todayPunchesSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
+        const todayPunchesSnapshot = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('punches')
             .where('userEmail', '==', user.email)
             .where('timestamp', '>=', todayStart)
             .where('timestamp', '<=', todayEnd)
@@ -130,11 +136,10 @@ async function runScheduleCheck() {
             todayTypes.add(doc.data().type);
         });
 
-        // --- 0. VERIFICAÇÃO DE STATUS ESPECIAIS (Atestado, Férias, Folga) ---
         const hasSpecialStatus = todayTypes.has('atestado') || todayTypes.has('ferias') || todayTypes.has('folga');
 
         if (hasSpecialStatus) {
-            console.log(`Usuário ${user.name} possui status especial hoje (Atestado/Férias/Folga). Pulando verificações.`);
+            console.log(`[${appId}] ${user.name} possui status especial hoje. Pulando.`);
             continue;
         }
 
@@ -142,12 +147,10 @@ async function runScheduleCheck() {
         const hasExit = todayTypes.has('saida');
         const hasJustification = todayTypes.has('justificativa_hora_extra');
 
-        // --- VERIFICAÇÃO DE ATRASO (Entrada) ---
         if (currentTotalMinutes > (startTotalMinutes + 10) && currentTotalMinutes < (startTotalMinutes + delayWindow)) {
             if (!hasEntry) {
-                console.log(`Usuário ${user.name} atrasado! Enviando alerta.`);
+                console.log(`[${appId}] ${user.name} atrasado! Enviando alerta.`);
 
-                // Notificar Técnico
                 if (user.fcmTokens && user.fcmTokens.length > 0) {
                     await admin.messaging().sendEachForMulticast({
                         notification: {
@@ -159,7 +162,6 @@ async function runScheduleCheck() {
                     notificationsSent++;
                 }
 
-                // Notificar Admins
                 if (uniqueAdminTokens.length > 0) {
                     await admin.messaging().sendEachForMulticast({
                         notification: {
@@ -172,7 +174,6 @@ async function runScheduleCheck() {
             }
         }
 
-        // --- VERIFICAÇÃO DE SAÍDA (Hora Extra) ---
         if (currentTotalMinutes >= endTotalMinutes && currentTotalMinutes < (endTotalMinutes + overtimeWindow)) {
             if (!hasEntry) {
                 continue;
@@ -180,13 +181,12 @@ async function runScheduleCheck() {
 
             if (!hasExit) {
                 if (hasJustification) {
-                    console.log(`Usuário ${user.name} em hora extra, mas já justificado.`);
+                    console.log(`[${appId}] ${user.name} em hora extra, mas já justificado.`);
                     continue;
                 }
 
-                console.log(`Usuário ${user.name} passou do horário. Enviando alerta de Hora Extra.`);
+                console.log(`[${appId}] ${user.name} passou do horário. Enviando alerta de Hora Extra.`);
 
-                // Notificar Técnico
                 if (user.fcmTokens && user.fcmTokens.length > 0) {
                     await admin.messaging().sendEachForMulticast({
                         notification: {
@@ -201,7 +201,6 @@ async function runScheduleCheck() {
                     notificationsSent++;
                 }
 
-                // Notificar Admins
                 if (uniqueAdminTokens.length > 0) {
                     await admin.messaging().sendEachForMulticast({
                         notification: {
@@ -214,7 +213,19 @@ async function runScheduleCheck() {
             }
         }
     }
-    return { success: true, notificationsSent };
+    return notificationsSent;
+}
+
+async function runScheduleCheck() {
+    const companyIds = await getAllCompanyIds();
+    console.log(`Verificando escalas para ${companyIds.length} empresa(s): ${companyIds.join(', ')}`);
+
+    let totalNotifications = 0;
+    for (const companyId of companyIds) {
+        const sent = await runScheduleCheckForCompany(companyId);
+        totalNotifications += sent;
+    }
+    return { success: true, notificationsSent: totalNotifications };
 }
 
 // --- VERIFICAÇÃO AGENDADA (v2) ---
@@ -230,27 +241,19 @@ exports.forceCheckSchedules = onCall({ cors: true }, async (request) => {
     return await runScheduleCheck();
 });
 
-// --- VERIFICAÇÃO AUTOMÁTICA DE ALMOÇO (v1) ---
-async function runAutoLunchCheck() {
-    console.log("Iniciando verificação automática de almoço...");
+// --- VERIFICAÇÃO AUTOMÁTICA DE ALMOÇO (POR EMPRESA) ---
+async function runAutoLunchCheckForCompany(appId) {
     const now = new Date();
     const localNow = new Date(now.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     const currentHour = localNow.getHours();
     const currentMinute = localNow.getMinutes();
     const currentTotalMinutes = currentHour * 60 + currentMinute;
 
-    // Data String (YYYY-MM-DD)
-    const year = localNow.getFullYear();
-    const month = String(localNow.getMonth() + 1).padStart(2, '0');
-    const day = String(localNow.getDate()).padStart(2, '0');
-    // Obs: O banco usa timestamp, mas precisamos comparar o dia.
-
     let processedCount = 0;
 
-    // 1. Buscar Configurações Globais
     let globalAutoLunch = { enabled: false, limitTime: '15:30', minutes: 60 };
     try {
-        const settingsDoc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('settings').doc('notifications').get();
+        const settingsDoc = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('settings').doc('notifications').get();
         if (settingsDoc.exists) {
             const sData = settingsDoc.data();
             if (sData.autoLunch) {
@@ -262,18 +265,16 @@ async function runAutoLunchCheck() {
             }
         }
     } catch (e) {
-        console.error("Erro ao buscar settings de almoço:", e);
+        console.error(`[${appId}] Erro ao buscar settings de almoço:`, e);
     }
 
-    // 2. Buscar Técnicos
-    const usersSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('users')
+    const usersSnapshot = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('users')
         .where('role', '==', 'tech')
         .get();
 
     for (const docUser of usersSnapshot.docs) {
         const user = { id: docUser.id, ...docUser.data() };
 
-        // Determinar configurações efetivas (Override vs Global)
         let settings = { ...globalAutoLunch };
         if (user.autoLunch && user.autoLunch.override) {
             settings = {
@@ -285,56 +286,46 @@ async function runAutoLunchCheck() {
 
         if (!settings.enabled) continue;
 
-        // Parse Limite
         const [limH, limM] = settings.limitTime.split(':').map(Number);
         const limitTotalMinutes = limH * 60 + limM;
 
         if (currentTotalMinutes > limitTotalMinutes) {
-            // Verificar Punches de Hoje (filtrado por data no Firestore)
             const dayStart = new Date(localNow);
             dayStart.setHours(0, 0, 0, 0);
             const dayEnd = new Date(localNow);
             dayEnd.setHours(23, 59, 59, 999);
 
-            const punchesSnapshot = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches')
+            const punchesSnapshot = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('punches')
                 .where('userEmail', '==', user.email)
                 .where('timestamp', '>=', dayStart)
                 .where('timestamp', '<=', dayEnd)
                 .get();
 
-            const todayPunches = [];
             let hasEntry = false;
             let hasExit = false;
             let hasLunch = false;
 
             punchesSnapshot.forEach(pDoc => {
                 const pData = pDoc.data();
-                todayPunches.push({ id: pDoc.id, ...pData });
                 if (pData.type === 'entrada') hasEntry = true;
                 if (pData.type === 'saida') hasExit = true;
                 if (pData.type === 'saida_almoco' || pData.type === 'lunch_offline' || pData.type === 'auto_lunch') hasLunch = true;
             });
 
-            // Lógica:
-            // - Tem Entrada
-            // - NÃO tem Saída (se já saiu, assumimos que o dia acabou e não mexemos, ou se quiser deduzir pós-saida, seria outra lógica. O user pediu pra mudar o botão de ação, então implica que o user inda está trabalhando)
-            // - NÃO tem Almoço
             if (hasEntry && !hasExit && !hasLunch) {
-                console.log(`Aplicando Almoço Automático para ${user.name} (${settings.minutes} min).`);
+                console.log(`[${appId}] Aplicando Almoço Automático para ${user.name} (${settings.minutes} min).`);
 
-                // Inserir Punch
-                await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('punches').add({
+                await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('punches').add({
                     userEmail: user.email,
                     userName: user.name,
                     userId: user.id,
                     type: 'auto_lunch',
-                    durationMinutes: settings.minutes, // Campo customizado usado no frontend
+                    durationMinutes: settings.minutes,
                     timestamp: admin.firestore.FieldValue.serverTimestamp(),
                     device: 'Sistema Automático',
                     created_at: admin.firestore.FieldValue.serverTimestamp()
                 });
 
-                // Opcional: Notificar User
                 if (user.fcmTokens && user.fcmTokens.length > 0) {
                     await admin.messaging().sendEachForMulticast({
                         notification: {
@@ -350,7 +341,20 @@ async function runAutoLunchCheck() {
         }
     }
 
-    return { success: true, processed: processedCount };
+    return processedCount;
+}
+
+async function runAutoLunchCheck() {
+    console.log("Iniciando verificação automática de almoço...");
+    const companyIds = await getAllCompanyIds();
+    console.log(`Verificando almoço para ${companyIds.length} empresa(s): ${companyIds.join(', ')}`);
+
+    let totalProcessed = 0;
+    for (const companyId of companyIds) {
+        const processed = await runAutoLunchCheckForCompany(companyId);
+        totalProcessed += processed;
+    }
+    return { success: true, processed: totalProcessed };
 }
 
 // --- AGENDAMENTO ALMOÇO (a cada 15 min) ---

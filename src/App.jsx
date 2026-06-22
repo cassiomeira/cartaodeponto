@@ -1443,7 +1443,8 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
       const result = await sendManualNotification({
         userIds: selectedUsersForNotification,
         title: notificationTitle,
-        body: notificationBody
+        body: notificationBody,
+        companyId: appId
       });
 
       if (result.data.success) {
