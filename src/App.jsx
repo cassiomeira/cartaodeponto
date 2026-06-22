@@ -2341,28 +2341,39 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         lunchMs = 0;
       } else if (offlineLunch) {
         lunchMs = 3600000;
+        const isToday = currentDayDate.toDateString() === new Date().toDateString();
         if (entry && exit) {
           const totalDuration = exit.timestamp.toDate() - entry.timestamp.toDate();
           workedMs = totalDuration - lunchMs;
-        } else if (entry) {
-          const now = new Date();
-          const end = exit ? exit.timestamp.toDate() : now;
-          const totalDuration = end - entry.timestamp.toDate();
+        } else if (entry && isToday) {
+          // Jornada em aberto: só conta até agora se o dia for hoje
+          const totalDuration = new Date() - entry.timestamp.toDate();
           workedMs = Math.max(0, totalDuration - lunchMs);
+        } else if (entry) {
+          // Dia passado sem saída registrada: jornada incompleta, não inventa horas
+          workedMs = 0;
         }
       } else {
         if (lunchOut && lunchBack) {
           lunchMs = lunchBack.timestamp.toDate() - lunchOut.timestamp.toDate();
         }
 
+        const isToday = currentDayDate.toDateString() === new Date().toDateString();
+
         if (entry && lunchOut && lunchBack && exit) {
           workedMs = (lunchOut.timestamp.toDate() - entry.timestamp.toDate()) + (exit.timestamp.toDate() - lunchBack.timestamp.toDate());
         } else if (entry && lunchOut && lunchBack) {
-          workedMs = (lunchOut.timestamp.toDate() - entry.timestamp.toDate()) + (new Date() - lunchBack.timestamp.toDate());
+          // Voltou do almoço mas não bateu saída
+          workedMs = (lunchOut.timestamp.toDate() - entry.timestamp.toDate()) + (isToday ? (new Date() - lunchBack.timestamp.toDate()) : 0);
         } else if (entry && lunchOut) {
+          // Saiu para o almoço e não voltou
           workedMs = lunchOut.timestamp.toDate() - entry.timestamp.toDate();
+        } else if (entry && exit) {
+          // Jornada simples sem almoço (ex: sábado): entrada -> saída
+          workedMs = exit.timestamp.toDate() - entry.timestamp.toDate();
         } else if (entry) {
-          workedMs = new Date() - entry.timestamp.toDate();
+          // Entrada em aberto: só conta até agora se o dia for hoje; dias passados ficam incompletos
+          workedMs = isToday ? (new Date() - entry.timestamp.toDate()) : 0;
         }
       }
 
