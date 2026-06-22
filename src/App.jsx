@@ -2345,6 +2345,68 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     return calculateUserStats(reportUserObj, reportMonth, punches);
   }, [reportUserObj, reportMonth, punches]);
 
+  const [previousBalanceMs, setPreviousBalanceMs] = useState(null);
+  const [loadingBalance, setLoadingBalance] = useState(false);
+
+  useEffect(() => {
+    if (!reportUserObj || !reportMonth) {
+      setPreviousBalanceMs(null);
+      return;
+    }
+
+    const [year, month] = reportMonth.split('-').map(Number);
+    const selectedMonthStart = new Date(year, month - 1, 1);
+
+    if (month === 1 && year <= 2024) {
+      setPreviousBalanceMs(0);
+      return;
+    }
+
+    setLoadingBalance(true);
+
+    const q = query(
+      collection(db, 'artifacts', appId, 'public', 'data', 'punches'),
+      where('userEmail', '==', reportUserObj.email),
+      where('timestamp', '<', selectedMonthStart),
+      orderBy('timestamp', 'asc')
+    );
+
+    getDocs(q).then(snapshot => {
+      const allPrevPunches = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+      if (allPrevPunches.length === 0) {
+        setPreviousBalanceMs(0);
+        setLoadingBalance(false);
+        return;
+      }
+
+      const monthGroups = {};
+      allPrevPunches.forEach(p => {
+        const date = getDateFromTimestamp(p.timestamp);
+        if (!date) return;
+        const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+        if (!monthGroups[key]) monthGroups[key] = [];
+        monthGroups[key].push(p);
+      });
+
+      let totalPrevBalance = 0;
+      Object.keys(monthGroups).sort().forEach(monthKey => {
+        const monthStats = calculateUserStats(reportUserObj, monthKey, monthGroups[monthKey]);
+        const today = new Date();
+        today.setHours(23, 59, 59, 999);
+        const validStats = monthStats.filter(s => s.date <= today);
+        totalPrevBalance += validStats.reduce((acc, s) => acc + s.balanceMs, 0);
+      });
+
+      setPreviousBalanceMs(totalPrevBalance);
+      setLoadingBalance(false);
+    }).catch(err => {
+      console.error("Erro ao buscar saldo acumulado:", err);
+      setPreviousBalanceMs(null);
+      setLoadingBalance(false);
+    });
+  }, [reportUserObj, reportMonth]);
+
   const activeTechs = dailyStats.filter(s => s.status === 'Trabalhando').length;
   const onLunch = dailyStats.filter(s => s.status === 'Em Almoço').length;
   const totalOvertime = dailyStats.filter(s => s.totalWorkedMs > 28800000).length;
@@ -2977,7 +3039,18 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                       const isPositive = totalBalanceMs >= 0;
                       doc.setFontSize(12); doc.setFont("helvetica", "bold");
                       doc.setTextColor(isPositive ? 22 : 220, isPositive ? 163 : 38, isPositive ? 74 : 38);
-                      doc.text(`Saldo Líquido: ${isPositive ? '+' : '-'}${formatDuration(Math.abs(totalBalanceMs))}`, 14, finalY + 20);
+                      doc.text(`Saldo Líquido do Mês: ${isPositive ? '+' : '-'}${formatDuration(Math.abs(totalBalanceMs))}`, 14, finalY + 20);
+
+                      if (previousBalanceMs !== null) {
+                        const accMs = (previousBalanceMs || 0) + totalBalanceMs;
+                        const isAccPos = accMs >= 0;
+                        doc.setFontSize(10); doc.setFont("helvetica", "normal");
+                        doc.setTextColor(previousBalanceMs >= 0 ? 22 : 220, previousBalanceMs >= 0 ? 163 : 38, previousBalanceMs >= 0 ? 74 : 38);
+                        doc.text(`Saldo Meses Anteriores: ${previousBalanceMs >= 0 ? '+' : '-'}${formatDuration(Math.abs(previousBalanceMs))}`, 14, finalY + 28);
+                        doc.setFontSize(13); doc.setFont("helvetica", "bold");
+                        doc.setTextColor(isAccPos ? 22 : 220, isAccPos ? 163 : 38, isAccPos ? 74 : 38);
+                        doc.text(`SALDO ACUMULADO TOTAL: ${isAccPos ? '+' : '-'}${formatDuration(Math.abs(accMs))}`, 14, finalY + 36);
+                      }
 
                       doc.save(`Relatorio_Ponto_${targetUser.name.replace(/ /g, '_')}_${reportMonth}.pdf`);
                     }}
@@ -3103,10 +3176,14 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                         const totalWorkedMs = statsToSum.reduce((acc, curr) => acc + curr.workedMs, 0);
                         const isPositive = totalBalanceMs >= 0;
 
+                        const accumulatedMs = (previousBalanceMs || 0) + totalBalanceMs;
+                        const isAccPositive = accumulatedMs >= 0;
+
                         return (
+                          <>
                           <tr className="bg-slate-100 border-t-2 border-slate-200 font-bold">
                             <td colSpan="8" className="px-4 py-3 text-right text-slate-700 uppercase text-xs tracking-wider">
-                              Totais (Até Hoje):
+                              Saldo do Mês:
                             </td>
                             <td colSpan="2" className="px-4 py-3 text-center text-xs">
                               <div className="flex flex-col items-center gap-1">
@@ -3118,6 +3195,34 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                               </div>
                             </td>
                           </tr>
+                          {previousBalanceMs !== null && (
+                            <tr className="bg-indigo-50 border-t-2 border-indigo-200 font-bold">
+                              <td colSpan="8" className="px-4 py-3 text-right uppercase text-xs tracking-wider">
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span className="text-slate-500">Saldo Meses Anteriores:</span>
+                                  <span className="text-indigo-800 text-sm font-extrabold">Saldo Acumulado Total:</span>
+                                </div>
+                              </td>
+                              <td colSpan="2" className="px-4 py-3 text-center text-xs">
+                                <div className="flex flex-col items-center gap-1">
+                                  <span className={previousBalanceMs >= 0 ? 'text-green-700' : 'text-red-700'}>
+                                    {previousBalanceMs >= 0 ? '+' : '-'}{formatDuration(Math.abs(previousBalanceMs))}
+                                  </span>
+                                  <span className={`border-t-2 border-indigo-300 w-full pt-1 text-sm font-extrabold ${isAccPositive ? 'text-green-700' : 'text-red-700'}`}>
+                                    {isAccPositive ? '+' : '-'}{formatDuration(Math.abs(accumulatedMs))}
+                                  </span>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                          {loadingBalance && (
+                            <tr className="bg-slate-50">
+                              <td colSpan="10" className="px-4 py-2 text-center text-xs text-slate-400 italic">
+                                Calculando saldo acumulado...
+                              </td>
+                            </tr>
+                          )}
+                          </>
                         );
                       })()}
                     </tfoot>
