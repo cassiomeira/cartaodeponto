@@ -60,7 +60,9 @@ import {
   Search,
 
   FileDown,
-  BellOff
+  BellOff,
+  DollarSign,
+  Plus
 } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -2195,8 +2197,58 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
   }, [punches, selectedDate, allUsers, sortBy, sortOrder]);
 
   const [reportUser, setReportUser] = useState('');
+  const [compensations, setCompensations] = useState([]);
+  const [showCompensationModal, setShowCompensationModal] = useState(false);
+  const [compHours, setCompHours] = useState('');
+  const [compMinutes, setCompMinutes] = useState('');
+  const [compDescription, setCompDescription] = useState('');
+  const [compDate, setCompDate] = useState(new Date().toISOString().split('T')[0]);
 
   const reportUserObj = useMemo(() => allUsers.find(u => u.id === reportUser), [allUsers, reportUser]);
+
+  useEffect(() => {
+    if (!reportUserObj) { setCompensations([]); return; }
+    const q = query(
+      collection(db, 'artifacts', appId, 'public', 'data', 'compensations'),
+      where('userEmail', '==', reportUserObj.email),
+      orderBy('date', 'desc')
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      setCompensations(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error("Erro compensations:", err));
+    return () => unsub();
+  }, [reportUserObj]);
+
+  const handleAddCompensation = async () => {
+    const hours = parseInt(compHours) || 0;
+    const minutes = parseInt(compMinutes) || 0;
+    if (hours === 0 && minutes === 0) { alert('Informe as horas a abater.'); return; }
+    if (!reportUserObj) return;
+
+    const totalMs = (hours * 3600000) + (minutes * 60000);
+
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'compensations'), {
+      userEmail: reportUserObj.email,
+      userName: reportUserObj.name,
+      hoursMs: totalMs,
+      description: compDescription || 'Compra de horas',
+      date: compDate,
+      createdAt: serverTimestamp(),
+      createdBy: currentUserData.email
+    });
+
+    setCompHours(''); setCompMinutes(''); setCompDescription(''); setShowCompensationModal(false);
+    alert(`${hours}h${minutes > 0 ? minutes + 'min' : ''} abatidas do saldo de ${reportUserObj.name}.`);
+  };
+
+  const handleDeleteCompensation = async (compId) => {
+    if (!confirm('Remover este abatimento?')) return;
+    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'compensations', compId));
+  };
+
+  const totalCompensationsMs = useMemo(() => {
+    return compensations.reduce((acc, c) => acc + (c.hoursMs || 0), 0);
+  }, [compensations]);
 
   // Função auxiliar para obter horas esperadas
   const getExpectedWorkHours = (dayOfWeek, user, date) => {
@@ -3043,13 +3095,19 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
 
                       if (previousBalanceMs !== null) {
                         const accMs = (previousBalanceMs || 0) + totalBalanceMs;
-                        const isAccPos = accMs >= 0;
+                        const finalMs = accMs - totalCompensationsMs;
+                        const isFinalPos = finalMs >= 0;
                         doc.setFontSize(10); doc.setFont("helvetica", "normal");
-                        doc.setTextColor(previousBalanceMs >= 0 ? 22 : 220, previousBalanceMs >= 0 ? 163 : 38, previousBalanceMs >= 0 ? 74 : 38);
-                        doc.text(`Saldo Meses Anteriores: ${previousBalanceMs >= 0 ? '+' : '-'}${formatDuration(Math.abs(previousBalanceMs))}`, 14, finalY + 28);
+                        doc.setTextColor(accMs >= 0 ? 22 : 220, accMs >= 0 ? 163 : 38, accMs >= 0 ? 74 : 38);
+                        doc.text(`Saldo Acumulado (todos os meses): ${accMs >= 0 ? '+' : '-'}${formatDuration(Math.abs(accMs))}`, 14, finalY + 28);
+                        if (totalCompensationsMs > 0) {
+                          doc.setTextColor(234, 88, 12);
+                          doc.text(`Horas Compradas (abatidas): -${formatDuration(totalCompensationsMs)}`, 14, finalY + 34);
+                        }
+                        const yOffset = totalCompensationsMs > 0 ? 42 : 36;
                         doc.setFontSize(13); doc.setFont("helvetica", "bold");
-                        doc.setTextColor(isAccPos ? 22 : 220, isAccPos ? 163 : 38, isAccPos ? 74 : 38);
-                        doc.text(`SALDO ACUMULADO TOTAL: ${isAccPos ? '+' : '-'}${formatDuration(Math.abs(accMs))}`, 14, finalY + 36);
+                        doc.setTextColor(isFinalPos ? 22 : 220, isFinalPos ? 163 : 38, isFinalPos ? 74 : 38);
+                        doc.text(`SALDO FINAL: ${isFinalPos ? '+' : '-'}${formatDuration(Math.abs(finalMs))}`, 14, finalY + yOffset);
                       }
 
                       doc.save(`Relatorio_Ponto_${targetUser.name.replace(/ /g, '_')}_${reportMonth}.pdf`);
@@ -3177,7 +3235,8 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                         const isPositive = totalBalanceMs >= 0;
 
                         const accumulatedMs = (previousBalanceMs || 0) + totalBalanceMs;
-                        const isAccPositive = accumulatedMs >= 0;
+                        const finalBalanceMs = accumulatedMs - totalCompensationsMs;
+                        const isFinalPositive = finalBalanceMs >= 0;
 
                         return (
                           <>
@@ -3199,17 +3258,21 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                             <tr className="bg-indigo-50 border-t-2 border-indigo-200 font-bold">
                               <td colSpan="8" className="px-4 py-3 text-right uppercase text-xs tracking-wider">
                                 <div className="flex flex-col items-end gap-0.5">
-                                  <span className="text-slate-500">Saldo Meses Anteriores:</span>
-                                  <span className="text-indigo-800 text-sm font-extrabold">Saldo Acumulado Total:</span>
+                                  <span className="text-slate-500">Saldo Acumulado (todos os meses):</span>
+                                  {totalCompensationsMs > 0 && <span className="text-orange-600">Horas Compradas (abatidas):</span>}
+                                  <span className="text-indigo-800 text-sm font-extrabold">Saldo Final:</span>
                                 </div>
                               </td>
                               <td colSpan="2" className="px-4 py-3 text-center text-xs">
                                 <div className="flex flex-col items-center gap-1">
-                                  <span className={previousBalanceMs >= 0 ? 'text-green-700' : 'text-red-700'}>
-                                    {previousBalanceMs >= 0 ? '+' : '-'}{formatDuration(Math.abs(previousBalanceMs))}
+                                  <span className={accumulatedMs >= 0 ? 'text-green-700' : 'text-red-700'}>
+                                    {accumulatedMs >= 0 ? '+' : '-'}{formatDuration(Math.abs(accumulatedMs))}
                                   </span>
-                                  <span className={`border-t-2 border-indigo-300 w-full pt-1 text-sm font-extrabold ${isAccPositive ? 'text-green-700' : 'text-red-700'}`}>
-                                    {isAccPositive ? '+' : '-'}{formatDuration(Math.abs(accumulatedMs))}
+                                  {totalCompensationsMs > 0 && (
+                                    <span className="text-orange-600 font-bold">-{formatDuration(totalCompensationsMs)}</span>
+                                  )}
+                                  <span className={`border-t-2 border-indigo-300 w-full pt-1 text-sm font-extrabold ${isFinalPositive ? 'text-green-700' : 'text-red-700'}`}>
+                                    {isFinalPositive ? '+' : '-'}{formatDuration(Math.abs(finalBalanceMs))}
                                   </span>
                                 </div>
                               </td>
@@ -3230,6 +3293,105 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                 </div>
               </div>
             )}
+
+            {reportUser && (
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mt-6">
+                <div className="px-6 py-4 border-b border-slate-100 bg-orange-50/50 flex justify-between items-center">
+                  <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                    <DollarSign size={20} className="text-orange-600" /> Compra de Horas (Abatimentos)
+                  </h3>
+                  <button
+                    onClick={() => setShowCompensationModal(true)}
+                    className="bg-orange-600 hover:bg-orange-700 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 transition-colors"
+                  >
+                    <Plus size={16} /> Registrar Compra
+                  </button>
+                </div>
+                {compensations.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="text-xs text-slate-500 uppercase tracking-wider bg-slate-50 border-b border-slate-100">
+                          <th className="px-4 py-3 font-semibold">Data</th>
+                          <th className="px-4 py-3 font-semibold">Descrição</th>
+                          <th className="px-4 py-3 font-semibold text-center">Horas Abatidas</th>
+                          <th className="px-4 py-3 font-semibold text-center">Registrado por</th>
+                          <th className="px-4 py-3 font-semibold text-center">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-sm text-slate-700 divide-y divide-slate-100">
+                        {compensations.map(comp => (
+                          <tr key={comp.id} className="hover:bg-slate-50">
+                            <td className="px-4 py-3 font-mono text-xs">{comp.date}</td>
+                            <td className="px-4 py-3">{comp.description}</td>
+                            <td className="px-4 py-3 text-center">
+                              <span className="text-orange-700 font-bold bg-orange-100 px-2 py-1 rounded text-xs">
+                                -{formatDuration(comp.hoursMs)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-center text-xs text-slate-500">{comp.createdBy}</td>
+                            <td className="px-4 py-3 text-center">
+                              <button onClick={() => handleDeleteCompensation(comp.id)} className="text-red-400 hover:text-red-600 p-1 rounded transition-colors" title="Remover">
+                                <Trash2 size={16} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr className="bg-orange-50 border-t-2 border-orange-200 font-bold">
+                          <td colSpan="2" className="px-4 py-3 text-right text-orange-800 uppercase text-xs">Total Abatido:</td>
+                          <td className="px-4 py-3 text-center text-orange-700 font-extrabold">-{formatDuration(totalCompensationsMs)}</td>
+                          <td colSpan="2"></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="p-6 text-center text-slate-400 text-sm">
+                    Nenhuma compra de horas registrada para este técnico.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {showCompensationModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+              <h3 className="font-bold text-lg text-slate-800 mb-4 flex items-center gap-2">
+                <DollarSign size={20} className="text-orange-600" /> Registrar Compra de Horas
+              </h3>
+              <p className="text-sm text-slate-500 mb-4">Técnico: <strong>{reportUserObj?.name}</strong></p>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Horas a abater</label>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <input type="number" min="0" value={compHours} onChange={e => setCompHours(e.target.value)} placeholder="Horas" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+                    </div>
+                    <span className="self-center text-slate-400 font-bold">h</span>
+                    <div className="flex-1">
+                      <input type="number" min="0" max="59" value={compMinutes} onChange={e => setCompMinutes(e.target.value)} placeholder="Min" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+                    </div>
+                    <span className="self-center text-slate-400 font-bold">min</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Data da compra</label>
+                  <input type="date" value={compDate} onChange={e => setCompDate(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Descrição (opcional)</label>
+                  <input type="text" value={compDescription} onChange={e => setCompDescription(e.target.value)} placeholder="Ex: Pagamento horas extras junho" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+                </div>
+              </div>
+              <div className="flex gap-3 mt-6">
+                <button onClick={() => setShowCompensationModal(false)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 rounded-lg font-bold text-sm transition-colors">Cancelar</button>
+                <button onClick={handleAddCompensation} className="flex-1 bg-orange-600 hover:bg-orange-700 text-white py-2 rounded-lg font-bold text-sm transition-colors">Confirmar Abatimento</button>
+              </div>
+            </div>
           </div>
         )}
 
