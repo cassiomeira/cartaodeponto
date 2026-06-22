@@ -62,7 +62,8 @@ import {
   Shield,
   Bell,
   Check,
-  FileDown
+  FileDown,
+  BellOff
 } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -1892,6 +1893,9 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
     return () => unsubscribe();
   }, []);
 
+  // Estado para Relatórios (declarado antes do useEffect que o usa)
+  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
+
   // Buscar Pontos (filtrado pelo mês do relatório)
   useEffect(() => {
     const [year, month] = reportMonth.split('-').map(Number);
@@ -2333,8 +2337,6 @@ const ManagerDashboard = ({ currentUserData, onLogout, companyId }) => {
     return processedStats;
   }, [punches, selectedDate, allUsers, sortBy, sortOrder]);
 
-  // Estado para Relatórios
-  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
   const [reportUser, setReportUser] = useState('');
 
   const reportUserObj = useMemo(() => allUsers.find(u => u.id === reportUser), [allUsers, reportUser]);
