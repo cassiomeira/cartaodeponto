@@ -402,3 +402,87 @@ exports.syncGlobalRegistry = onCall({ cors: true }, async (request) => {
 
     return { success: true, synced, companiesChecked: companyIds.length };
 });
+
+// --- DIAGNÓSTICO: onde um email está cadastrado ---
+exports.debugUserLookup = onCall({ cors: true }, async (request) => {
+    const { email } = request.data;
+    if (!email) throw new HttpsError('invalid-argument', 'Email obrigatório.');
+    const cleanEmail = email.toLowerCase().trim();
+
+    const registryDoc = await db.collection('artifacts').doc('global_registry')
+        .collection('public').doc('data').collection('users').doc(cleanEmail).get();
+
+    const result = {
+        globalRegistry: registryDoc.exists ? registryDoc.data() : null,
+        foundInCompanies: []
+    };
+
+    const companyIds = await getAllCompanyIds();
+    for (const companyId of companyIds) {
+        const snap = await db.collection('artifacts').doc(companyId)
+            .collection('public').doc('data').collection('users')
+            .where('email', '==', cleanEmail).get();
+        if (!snap.empty) {
+            result.foundInCompanies.push({
+                companyId,
+                userId: snap.docs[0].id,
+                role: snap.docs[0].data().role
+            });
+        }
+    }
+    return result;
+});
+
+// --- LISTAR USUARIOS DE UMA EMPRESA ---
+exports.listCompanyUsers = onCall({ cors: true }, async (request) => {
+    const { companyId } = request.data;
+    if (!companyId) throw new HttpsError('invalid-argument', 'companyId obrigatório.');
+
+    const snap = await db.collection('artifacts').doc(companyId)
+        .collection('public').doc('data').collection('users').get();
+
+    const users = snap.docs.map(d => ({ id: d.id, name: d.data().name, email: d.data().email, role: d.data().role }));
+    return { companyId, total: users.length, users };
+});
+
+// --- CORRIGIR REGISTRO: força email para empresa correta ---
+exports.fixUserRegistry = onCall({ cors: true }, async (request) => {
+    const { email, companyId } = request.data;
+    if (!email || !companyId) throw new HttpsError('invalid-argument', 'Email e companyId obrigatórios.');
+
+    const cleanEmail = email.toLowerCase().trim();
+    await db.collection('artifacts').doc('global_registry')
+        .collection('public').doc('data').collection('users').doc(cleanEmail)
+        .set({ companyId, role: 'admin', registeredAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+
+    return { success: true, email: cleanEmail, companyId };
+});
+
+// --- MOVER/COPIAR USUARIO ENTRE EMPRESAS ---
+exports.copyUserToCompany = onCall({ cors: true }, async (request) => {
+    const { email, fromCompanyId, toCompanyId, newRole } = request.data;
+    if (!email || !fromCompanyId || !toCompanyId) throw new HttpsError('invalid-argument', 'email, fromCompanyId e toCompanyId obrigatórios.');
+
+    const cleanEmail = email.toLowerCase().trim();
+
+    // Buscar usuario na empresa de origem
+    const fromSnap = await db.collection('artifacts').doc(fromCompanyId)
+        .collection('public').doc('data').collection('users')
+        .where('email', '==', cleanEmail).get();
+
+    if (fromSnap.empty) throw new HttpsError('not-found', 'Usuário não encontrado na empresa de origem.');
+
+    const userData = fromSnap.docs[0].data();
+    if (newRole) userData.role = newRole;
+
+    // Criar na empresa destino
+    const newRef = await db.collection('artifacts').doc(toCompanyId)
+        .collection('public').doc('data').collection('users').add(userData);
+
+    // Atualizar global_registry
+    await db.collection('artifacts').doc('global_registry')
+        .collection('public').doc('data').collection('users').doc(cleanEmail)
+        .set({ companyId: toCompanyId, role: userData.role, registeredAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+
+    return { success: true, newUserId: newRef.id, email: cleanEmail, toCompanyId };
+});
