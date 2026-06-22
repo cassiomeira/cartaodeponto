@@ -506,7 +506,7 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('Carregando...');
   const [todayPunches, setTodayPunches] = useState([]);
-  const [lastPunch, setLastPunch] = useState(null);
+  const lastPunch = todayPunches.length > 0 ? todayPunches[todayPunches.length - 1] : null;
 
   // Estados para justificativa de hora extra
   const [showJustificationModal, setShowJustificationModal] = useState(false);
@@ -699,11 +699,9 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
       });
 
       setTodayPunches(myPunchesToday);
-      if (myPunchesToday.length > 0) {
-        setLastPunch(myPunchesToday[myPunchesToday.length - 1]);
-      } else {
-        setLastPunch(null);
-      }
+      if (status === 'Carregando...') setStatus('');
+    }, (error) => {
+      console.error("Erro no listener de punches:", error);
       if (status === 'Carregando...') setStatus('');
     });
     return () => unsubscribe();
@@ -929,6 +927,7 @@ const TechnicianView = ({ user, currentUserData, onLogout }) => {
                   {lastPunch.type === 'entrada' && <span className="text-green-300">Em Trabalho</span>}
                   {lastPunch.type === 'saida_almoco' && <span className="text-yellow-300">Em Almoço</span>}
                   {lastPunch.type === 'volta_almoco' && <span className="text-green-300">Em Trabalho</span>}
+                  {(lastPunch.type === 'lunch_offline' || lastPunch.type === 'auto_lunch') && <span className="text-orange-300">Aguardando Saída</span>}
                   {lastPunch.type === 'saida' && <span className="text-slate-300">Jornada Encerrada</span>}
                 </>
               ) : 'Não Iniciado'}
