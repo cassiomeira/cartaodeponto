@@ -236,7 +236,7 @@ const LoginScreen = ({ onLogin, setGlobalCompanyId }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Verifica email no REGISTRO GLOBAL ou LEGADO
+  // Verifica email no REGISTRO GLOBAL, LEGADO ou TODAS as empresas
   const checkEmail = async (e) => {
     e.preventDefault();
     if (!email.trim() || !email.includes('@')) {
@@ -251,8 +251,7 @@ const LoginScreen = ({ onLogin, setGlobalCompanyId }) => {
       const cleanEmail = email.toLowerCase().trim();
       let foundCompanyId = null;
 
-      // 1. Tenta no REGISTRO GLOBAL (Novo Padrão)
-      // Ajuste de Path: 'public/data/users' para manter padrão de segurança
+      // 1. Tenta no REGISTRO GLOBAL
       const registryDoc = await getDoc(doc(db, 'artifacts', 'global_registry', 'public', 'data', 'users', cleanEmail));
 
       if (registryDoc.exists()) {
@@ -267,6 +266,40 @@ const LoginScreen = ({ onLogin, setGlobalCompanyId }) => {
         if (!legacySnap.empty) {
           foundCompanyId = legacyId;
           console.log("Encontrado no sistema legado:", foundCompanyId);
+          // Registra no global_registry para próximos logins
+          const userData = legacySnap.docs[0].data();
+          await setDoc(doc(db, 'artifacts', 'global_registry', 'public', 'data', 'users', cleanEmail), {
+            companyId: legacyId,
+            role: userData.role || 'tech',
+            registeredAt: serverTimestamp()
+          });
+        }
+      }
+
+      // 3. Último fallback: busca em TODAS as empresas conhecidas do registry
+      if (!foundCompanyId) {
+        console.log("Não encontrado no registry nem no legado. Buscando em todas as empresas...");
+        const allRegistryUsers = await getDocs(collection(db, 'artifacts', 'global_registry', 'public', 'data', 'users'));
+        const companyIds = new Set();
+        allRegistryUsers.forEach(d => {
+          if (d.data().companyId) companyIds.add(d.data().companyId);
+        });
+
+        for (const cId of companyIds) {
+          const q = query(collection(db, 'artifacts', cId, 'public', 'data', 'users'), where('email', '==', cleanEmail));
+          const snap = await getDocs(q);
+          if (!snap.empty) {
+            foundCompanyId = cId;
+            console.log("Encontrado na empresa:", cId);
+            // Registra no global_registry para próximos logins
+            const userData = snap.docs[0].data();
+            await setDoc(doc(db, 'artifacts', 'global_registry', 'public', 'data', 'users', cleanEmail), {
+              companyId: cId,
+              role: userData.role || 'tech',
+              registeredAt: serverTimestamp()
+            });
+            break;
+          }
         }
       }
 

@@ -369,3 +369,36 @@ exports.checkAutoLunch = onSchedule({
 exports.forceCheckAutoLunch = onCall({ cors: true }, async (request) => {
     return await runAutoLunchCheck();
 });
+
+// --- SINCRONIZAR GLOBAL REGISTRY (registra usuários de todas as empresas) ---
+exports.syncGlobalRegistry = onCall({ cors: true }, async (request) => {
+    const companyIds = await getAllCompanyIds();
+    let synced = 0;
+
+    for (const companyId of companyIds) {
+        const usersSnapshot = await db.collection('artifacts').doc(companyId)
+            .collection('public').doc('data').collection('users').get();
+
+        for (const userDoc of usersSnapshot.docs) {
+            const userData = userDoc.data();
+            if (!userData.email) continue;
+
+            const email = userData.email.toLowerCase().trim();
+            const registryRef = db.collection('artifacts').doc('global_registry')
+                .collection('public').doc('data').collection('users').doc(email);
+
+            const existing = await registryRef.get();
+            if (!existing.exists) {
+                await registryRef.set({
+                    companyId: companyId,
+                    role: userData.role || 'tech',
+                    registeredAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                synced++;
+                console.log(`Registrado: ${email} -> ${companyId}`);
+            }
+        }
+    }
+
+    return { success: true, synced, companiesChecked: companyIds.length };
+});
