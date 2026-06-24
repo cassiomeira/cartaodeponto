@@ -2299,6 +2299,13 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     const daysInMonth = new Date(year, month, 0).getDate();
     const stats = [];
 
+    // Data de cadastro do tecnico: dias anteriores nao sao contabilizados
+    // (tecnico nao podia ter horas antes de existir no sistema).
+    const userCreatedDate = getDateFromTimestamp(userObj.createdAt);
+    const userStartDay = userCreatedDate
+      ? new Date(userCreatedDate.getFullYear(), userCreatedDate.getMonth(), userCreatedDate.getDate())
+      : null;
+
     // Filtra punches do usuário e mês selecionados
     const userPunches = allPunches.filter(p => {
       if (!p.timestamp) return false;
@@ -2383,6 +2390,12 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
       let expectedMs = getExpectedWorkHours(dayOfWeek, userObj, currentDayDate);
 
       if (atestado || ferias || folga) expectedMs = 0;
+
+      // Dias anteriores ao cadastro do tecnico nao geram saldo (nem positivo nem negativo)
+      if (userStartDay && currentDayDate < userStartDay) {
+        workedMs = 0;
+        expectedMs = 0;
+      }
 
       const balanceMs = workedMs - expectedMs;
 
