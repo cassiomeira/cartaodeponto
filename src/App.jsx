@@ -2420,7 +2420,13 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     const [year, month] = reportMonth.split('-').map(Number);
     const selectedMonthStart = new Date(year, month - 1, 1);
 
-    if (month === 1 && year <= 2024) {
+    // Data de inicio da contabilizacao: 01/12/2025.
+    // Novembro/2025 e anteriores foram periodo de teste do app e nao contam no saldo.
+    const accumulationStart = new Date(2025, 11, 1);
+
+    // Se o mes selecionado for o proprio inicio (dez/2025) ou anterior,
+    // nao ha meses validos antes dele para acumular.
+    if (selectedMonthStart <= accumulationStart) {
       setPreviousBalanceMs(0);
       return;
     }
@@ -2430,6 +2436,7 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     const q = query(
       collection(db, 'artifacts', appId, 'public', 'data', 'punches'),
       where('userEmail', '==', reportUserObj.email),
+      where('timestamp', '>=', accumulationStart),
       where('timestamp', '<', selectedMonthStart),
       orderBy('timestamp', 'asc')
     );
