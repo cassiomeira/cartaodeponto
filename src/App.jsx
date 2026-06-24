@@ -44,6 +44,9 @@ import {
   Mail,
   ArrowRight,
   UserPlus,
+  Shield,
+  Check,
+  User,
   Lock,
   Download,
   FileSpreadsheet,
@@ -2204,6 +2207,48 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
   const [compDescription, setCompDescription] = useState('');
   const [compDate, setCompDate] = useState(new Date().toISOString().split('T')[0]);
 
+  // Cadastro de tecnico pela gerencia
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [newUser, setNewUser] = useState({ name: '', email: '', password: '', phone: '', role: 'tech' });
+  const [isAddingUser, setIsAddingUser] = useState(false);
+
+  const handleAddUser = async () => {
+    if (!newUser.name || !newUser.email || !newUser.password) return alert("Preencha nome, email e senha.");
+    setIsAddingUser(true);
+    try {
+      const emailNorm = newUser.email.toLowerCase().trim();
+
+      // Verifica se ja existe
+      const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+      const existing = await getDocs(query(usersRef, where('email', '==', emailNorm)));
+      if (!existing.empty) {
+        alert("Este email ja esta cadastrado.");
+        setIsAddingUser(false);
+        return;
+      }
+
+      await addDoc(usersRef, {
+        name: newUser.name.trim(),
+        email: emailNorm,
+        password: newUser.password.trim(),
+        phone: newUser.phone.trim(),
+        role: newUser.role,
+        createdAt: serverTimestamp(),
+        active: true,
+        trackingEnabled: true
+      });
+
+      alert("Tecnico cadastrado com sucesso!");
+      setShowAddUserModal(false);
+      setNewUser({ name: '', email: '', password: '', phone: '', role: 'tech' });
+    } catch (error) {
+      console.error("Erro ao cadastrar tecnico:", error);
+      alert("Erro ao cadastrar: " + error.message);
+    } finally {
+      setIsAddingUser(false);
+    }
+  };
+
   const reportUserObj = useMemo(() => allUsers.find(u => u.id === reportUser), [allUsers, reportUser]);
 
   useEffect(() => {
@@ -3721,9 +3766,17 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
         {
           activeTab === 'admins' && (
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+              <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center gap-3">
                 <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users size={20} className="text-indigo-600" /> Gestão de Usuários</h3>
-                <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600">Total: {allUsers.length}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs bg-slate-200 px-2 py-1 rounded text-slate-600">Total: {allUsers.length}</span>
+                  <button
+                    onClick={() => setShowAddUserModal(true)}
+                    className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200"
+                  >
+                    <UserPlus size={18} /> Novo Técnico
+                  </button>
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -4187,6 +4240,113 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                       className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-lg shadow-indigo-600/30 transition-all active:scale-95"
                     >
                       Salvar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        }
+
+        {/* MODAL NOVO TÉCNICO (cadastro pela gerência) */}
+        {
+          showAddUserModal && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[2000] p-4 backdrop-blur-sm">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 p-6 flex justify-between items-center text-white">
+                  <div>
+                    <h3 className="font-bold text-xl flex items-center gap-2"><UserPlus size={24} /> Novo Técnico</h3>
+                    <p className="text-indigo-100 text-sm mt-1">Cadastrar novo membro na equipe</p>
+                  </div>
+                  <button onClick={() => setShowAddUserModal(false)} className="hover:bg-white/20 p-2 rounded-lg transition-colors"><X size={24} /></button>
+                </div>
+
+                <div className="p-8 space-y-5">
+                  <div className="grid grid-cols-2 gap-5">
+                    <div className="col-span-2">
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Nome Completo</label>
+                      <div className="relative">
+                        <User size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          value={newUser.name}
+                          onChange={(e) => setNewUser({ ...newUser, name: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                          placeholder="Ex: João da Silva"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-sm font-bold text-slate-700 mb-2">E-mail (Login)</label>
+                      <div className="relative">
+                        <Mail size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="email"
+                          value={newUser.email}
+                          onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                          placeholder="joao@empresa.com"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Senha Inicial</label>
+                      <div className="relative">
+                        <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          value={newUser.password}
+                          onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                          placeholder="******"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Telefone</label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={newUser.phone}
+                          onChange={(e) => setNewUser({ ...newUser, phone: e.target.value })}
+                          className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                          placeholder="(opcional)"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="col-span-2">
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Função</label>
+                      <div className="relative">
+                        <Shield size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <select
+                          value={newUser.role}
+                          onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}
+                          className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-white transition-all appearance-none"
+                        >
+                          <option value="tech">Técnico</option>
+                          <option value="admin">Administrador</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex gap-3">
+                    <button
+                      onClick={() => setShowAddUserModal(false)}
+                      className="flex-1 py-3 bg-slate-100 text-slate-700 font-bold rounded-xl hover:bg-slate-200 transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={handleAddUser}
+                      disabled={isAddingUser}
+                      className="flex-1 py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 shadow-xl shadow-indigo-600/20 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-70 disabled:cursor-not-allowed"
+                    >
+                      {isAddingUser ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full" /> : <><Check size={20} /> Cadastrar Técnico</>}
                     </button>
                   </div>
                 </div>
