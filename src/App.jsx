@@ -2249,6 +2249,96 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
     }
   };
 
+  const [generatingSummary, setGeneratingSummary] = useState(false);
+
+  // Relatorio resumido: 1 linha por tecnico com o saldo acumulado final
+  const generateSummaryPDF = async () => {
+    setGeneratingSummary(true);
+    try {
+      const [year, month] = reportMonth.split('-').map(Number);
+      const selectedMonthEnd = new Date(year, month, 0, 23, 59, 59, 999);
+      const accumulationStart = new Date(2025, 11, 1); // 01/12/2025
+
+      // Busca todos os pontos do periodo (corte -> fim do mes selecionado)
+      const punchesSnap = await getDocs(query(
+        collection(db, 'artifacts', appId, 'public', 'data', 'punches'),
+        where('timestamp', '>=', accumulationStart),
+        where('timestamp', '<=', selectedMonthEnd),
+        orderBy('timestamp', 'asc')
+      ));
+      const allP = punchesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      // Busca todas as compras de horas
+      const compSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'compensations'));
+      const allComp = compSnap.docs.map(d => d.data());
+
+      const today = new Date(); today.setHours(23, 59, 59, 999);
+      const techs = allUsers.filter(u => u.role !== 'admin').sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+      const rows = techs.map(user => {
+        const userP = allP.filter(p => p.userEmail === user.email);
+        const monthGroups = {};
+        userP.forEach(p => {
+          const dt = getDateFromTimestamp(p.timestamp); if (!dt) return;
+          const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+          (monthGroups[key] = monthGroups[key] || []).push(p);
+        });
+        let totalBalance = 0;
+        Object.keys(monthGroups).forEach(mk => {
+          const st = calculateUserStats(user, mk, monthGroups[mk]);
+          totalBalance += st.filter(s => s.date <= today).reduce((a, s) => a + s.balanceMs, 0);
+        });
+        const userComp = allComp
+          .filter(c => c.userEmail === user.email && (!c.date || new Date(c.date) <= selectedMonthEnd))
+          .reduce((a, c) => a + (c.hoursMs || 0), 0);
+        const finalMs = totalBalance - userComp;
+        return { name: user.name, finalMs };
+      });
+
+      const doc = new jsPDF();
+      doc.setFontSize(16); doc.setFont('helvetica', 'bold'); doc.setTextColor(40, 40, 40);
+      doc.text('Resumo de Saldo de Horas - Netcar', 14, 18);
+      doc.setFontSize(10); doc.setFont('helvetica', 'normal'); doc.setTextColor(100);
+      const [my, mm] = reportMonth.split('-');
+      doc.text(`Posicao ate ${mm}/${my}  |  ${techs.length} tecnicos  |  Ja descontadas as horas compradas`, 14, 25);
+
+      const body = rows.map(r => {
+        const positivo = r.finalMs >= 0;
+        const situacao = r.finalMs === 0 ? 'ZERADO' : (positivo ? 'A FAVOR' : 'NEGATIVAS');
+        return [r.name, `${positivo ? '+' : ''}${formatDuration(r.finalMs)}`, situacao];
+      });
+
+      autoTable(doc, {
+        startY: 31,
+        head: [['Tecnico', 'Saldo', 'Situacao']],
+        body,
+        styles: { fontSize: 10, cellPadding: 2.5 },
+        headStyles: { fillColor: [79, 70, 229], textColor: 255, fontStyle: 'bold' },
+        alternateRowStyles: { fillColor: [248, 250, 252] },
+        columnStyles: {
+          0: { cellWidth: 110 },
+          1: { cellWidth: 38, halign: 'right', fontStyle: 'bold' },
+          2: { cellWidth: 35, halign: 'center', fontStyle: 'bold' },
+        },
+        didParseCell: (data) => {
+          if (data.section === 'body' && (data.column.index === 1 || data.column.index === 2)) {
+            const txt = rows[data.row.index]?.finalMs;
+            if (txt > 0) data.cell.styles.textColor = [22, 163, 74];
+            else if (txt < 0) data.cell.styles.textColor = [220, 38, 38];
+            else data.cell.styles.textColor = [100, 116, 139];
+          }
+        },
+      });
+
+      doc.save(`Resumo_Saldos_Netcar_${reportMonth}.pdf`);
+    } catch (err) {
+      console.error('Erro ao gerar resumo:', err);
+      alert('Erro ao gerar o resumo: ' + err.message);
+    } finally {
+      setGeneratingSummary(false);
+    }
+  };
+
   const reportUserObj = useMemo(() => allUsers.find(u => u.id === reportUser), [allUsers, reportUser]);
 
   useEffect(() => {
@@ -2922,6 +3012,14 @@ const ManagerDashboard = ({ currentUserData, onLogout }) => {
                   </div>
                 </div>
                 <div className="flex-none flex gap-2">
+                  <button
+                    onClick={generateSummaryPDF}
+                    disabled={generatingSummary}
+                    className="flex-none bg-emerald-600 text-white hover:bg-emerald-700 px-4 py-2 rounded-lg font-bold text-sm shadow-sm transition-colors flex items-center gap-2 h-[42px] disabled:opacity-70 disabled:cursor-not-allowed"
+                  >
+                    {generatingSummary ? <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" /> : <FileText size={18} />}
+                    Resumo Geral (PDF)
+                  </button>
                   <button
                     onClick={() => {
                       if (confirm("Deseja gerar um relatório único contendo TODOS os colaboradores? Isso pode levar alguns segundos.")) {
